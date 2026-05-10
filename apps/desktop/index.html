@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data View</title>
+    <script>
+      // Apply persisted theme before React mounts to avoid a flash. Mirrors
+      // readInitialTheme() / themeInitScript in @data-view/ui.
+      (function () {
+        try {
+          var k = "dbview.theme";
+          var s = localStorage.getItem(k);
+          var t =
+            s === "minimal" || s === "hacker"
+              ? s
+              : window.matchMedia &&
+                window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "hacker"
+              : "minimal";
+          document.documentElement.dataset.theme = t;
+        } catch (_) {
+          document.documentElement.dataset.theme = "minimal";
+        }
+      })();
+    </script>
+  </head>
+  <body style="margin: 0">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

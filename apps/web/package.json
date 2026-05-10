@@ -1,0 +1,38 @@
+{
+  "name": "@data-view/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@data-view/core": "workspace:*",
+    "@data-view/ui": "workspace:*",
+    "next": "15.0.3",
+    "next-auth": "5.0.0-beta.25",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "better-sqlite3": "^12.9.0",
+    "bcryptjs": "^2.4.3",
+    "zod": "^3.23.8",
+    "pg": "^8.13.1",
+    "mysql2": "^3.11.4",
+    "mssql": "^11.0.1",
+    "tedious": "^18.6.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.9.0",
+    "@types/mssql": "^9.1.5",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "data-view",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.0.9",
+  "scripts": {
+    "dev:web": "pnpm --filter @data-view/web dev",
+    "dev:desktop": "pnpm --filter @data-view/desktop dev",
+    "build:web": "pnpm --filter @data-view/web build",
+    "build:desktop": "pnpm --filter @data-view/desktop build",
+    "build:packages": "pnpm --filter \"./packages/*\" build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r exec rm -rf node_modules dist .next .turbo"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
