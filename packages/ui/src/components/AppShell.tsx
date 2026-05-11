@@ -221,63 +221,61 @@ export function AppShell({ userArea }: Props) {
     (tab: DistributiveOmit<WorkspaceTab, "id">) => {
       const newTab = { ...tab, id: uid() } as WorkspaceTab;
       const key = tabIdentityKey(newTab);
-      setTabs((prev) => {
-        // SQL tabs always create a fresh entry.
-        if (newTab.kind !== "sql") {
-          const existing = prev.find((t) => tabIdentityKey(t) === key);
-          if (existing) {
-            setActiveTabId(existing.id);
-            return prev;
-          }
+      if (newTab.kind !== "sql") {
+        const existing = tabs.find((t) => tabIdentityKey(t) === key);
+        if (existing) {
+          setActiveTabId(existing.id);
+          return;
         }
-        setActiveTabId(newTab.id);
-        return [...prev, newTab];
-      });
+      }
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
     },
-    [],
+    [tabs],
   );
 
   const closeTab = useCallback(
     (id: string) => {
-      setTabs((prev) => {
-        const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) return prev;
-        const target = prev[idx]!;
-        if (target.kind === "sql") {
-          const linkedFile = target.fileId
-            ? files.find((f) => f.id === target.fileId)
-            : null;
-          const dirty = target.fileId == null
-            ? target.sql.length > 0
-            : !linkedFile || linkedFile.sql !== target.sql;
-          if (dirty) {
-            const ok = window.confirm(
-              `Tenés cambios sin guardar en "${target.title}". ¿Cerrar igual?`,
-            );
-            if (!ok) return prev;
-          }
+      const idx = tabs.findIndex((t) => t.id === id);
+      if (idx < 0) return;
+      const target = tabs[idx]!;
+      if (target.kind === "sql") {
+        const linkedFile = target.fileId
+          ? files.find((f) => f.id === target.fileId)
+          : null;
+        const dirty = target.fileId == null
+          ? target.sql.length > 0
+          : !linkedFile || linkedFile.sql !== target.sql;
+        if (dirty) {
+          const ok = window.confirm(
+            `Tenés cambios sin guardar en "${target.title}". ¿Cerrar igual?`,
+          );
+          if (!ok) return;
         }
-        const next = prev.filter((t) => t.id !== id);
-        if (next.length === 0) {
-          const t: WorkspaceTab = { id: uid(), kind: "connection-overview" };
-          setActiveTabId(t.id);
-          return [t];
-        }
+      }
+      const next = tabs.filter((t) => t.id !== id);
+      if (next.length === 0) {
+        const fallback: WorkspaceTab = {
+          id: uid(),
+          kind: "connection-overview",
+        };
+        setTabs([fallback]);
+        setActiveTabId(fallback.id);
+      } else {
+        setTabs(next);
         if (id === activeTabId) {
           const fallback = next[Math.max(0, idx - 1)] ?? next[0];
           if (fallback) setActiveTabId(fallback.id);
         }
-        // Drop a group that no longer has any tab.
-        if (target.groupId) {
-          const stillUsed = next.some((t) => t.groupId === target.groupId);
-          if (!stillUsed) {
-            setGroups((gs) => gs.filter((g) => g.id !== target.groupId));
-          }
+      }
+      if (target.groupId) {
+        const stillUsed = next.some((t) => t.groupId === target.groupId);
+        if (!stillUsed) {
+          setGroups((gs) => gs.filter((g) => g.id !== target.groupId));
         }
-        return next;
-      });
+      }
     },
-    [activeTabId, files],
+    [activeTabId, files, tabs],
   );
 
   // ── Tab groups ─────────────────────────────────────────────────────────────
@@ -359,21 +357,17 @@ export function AppShell({ userArea }: Props) {
       // If we're collapsing the group containing the active tab, jump focus to
       // the nearest visible tab so the user doesn't end up looking at an
       // invisible pane.
-      setTabs((prev) => {
-        const next = prev;
-        const willCollapse =
-          groups.find((g) => g.id === groupId)?.collapsed === false;
-        if (!willCollapse) return next;
-        const active = next.find((t) => t.id === activeTabId);
-        if (!active || active.groupId !== groupId) return next;
-        const fallback = next.find(
-          (t) => t.id !== active.id && t.groupId !== groupId,
-        );
-        if (fallback) setActiveTabId(fallback.id);
-        return next;
-      });
+      const willCollapse =
+        groups.find((g) => g.id === groupId)?.collapsed === false;
+      if (!willCollapse) return;
+      const active = tabs.find((t) => t.id === activeTabId);
+      if (!active || active.groupId !== groupId) return;
+      const fallback = tabs.find(
+        (t) => t.id !== active.id && t.groupId !== groupId,
+      );
+      if (fallback) setActiveTabId(fallback.id);
     },
-    [groups, activeTabId],
+    [groups, activeTabId, tabs],
   );
 
   const dissolveGroup = useCallback((groupId: string) => {
@@ -394,18 +388,19 @@ export function AppShell({ userArea }: Props) {
         } del grupo "${group?.name ?? ""}"?`,
       );
       if (!ok) return;
-      setTabs((prev) => {
-        let next = prev.filter((t) => !groupTabs.some((g) => g.id === t.id));
-        if (next.length === 0) {
-          const t: WorkspaceTab = { id: uid(), kind: "connection-overview" };
-          setActiveTabId(t.id);
-          next = [t];
-        } else if (groupTabs.some((g) => g.id === activeTabId)) {
-          const fallback = next.find((t) => t.groupId !== groupId) ?? next[0];
-          if (fallback) setActiveTabId(fallback.id);
-        }
-        return next;
-      });
+      let next = tabs.filter((t) => !groupTabs.some((g) => g.id === t.id));
+      if (next.length === 0) {
+        const fallback: WorkspaceTab = {
+          id: uid(),
+          kind: "connection-overview",
+        };
+        next = [fallback];
+        setActiveTabId(fallback.id);
+      } else if (groupTabs.some((g) => g.id === activeTabId)) {
+        const fallback = next.find((t) => t.groupId !== groupId) ?? next[0];
+        if (fallback) setActiveTabId(fallback.id);
+      }
+      setTabs(next);
       setGroups((gs) => gs.filter((g) => g.id !== groupId));
     },
     [groups, tabs, activeTabId],
@@ -413,19 +408,20 @@ export function AppShell({ userArea }: Props) {
 
   const openSql = useCallback(
     (seed?: string, opts?: { database?: string | null }) => {
-      setTabs((prev) => {
-        const t: WorkspaceTab = {
-          id: uid(),
+      const newId = uid();
+      setTabs((prev) => [
+        ...prev,
+        {
+          id: newId,
           kind: "sql",
           title: untitledSqlName(prev),
           sql: seed ?? "",
           fileId: null,
           database:
             opts?.database !== undefined ? opts.database : activeSchema,
-        };
-        setActiveTabId(t.id);
-        return [...prev, t];
-      });
+        },
+      ]);
+      setActiveTabId(newId);
     },
     [activeSchema],
   );
@@ -519,27 +515,28 @@ export function AppShell({ userArea }: Props) {
 
   const openSqlFile = useCallback(
     (file: SavedFile) => {
-      setTabs((prev) => {
-        const existing = prev.find(
-          (t) => t.kind === "sql" && t.fileId === file.id,
-        );
-        if (existing) {
-          setActiveTabId(existing.id);
-          return prev;
-        }
-        const t: WorkspaceTab = {
-          id: uid(),
+      const existing = tabs.find(
+        (t) => t.kind === "sql" && t.fileId === file.id,
+      );
+      if (existing) {
+        setActiveTabId(existing.id);
+        return;
+      }
+      const newId = uid();
+      setTabs((prev) => [
+        ...prev,
+        {
+          id: newId,
           kind: "sql",
           title: file.name,
           sql: file.sql,
           fileId: file.id,
           database: activeSchema,
-        };
-        setActiveTabId(t.id);
-        return [...prev, t];
-      });
+        },
+      ]);
+      setActiveTabId(newId);
     },
-    [activeSchema],
+    [activeSchema, tabs],
   );
 
   const deleteSqlFile = useCallback((file: SavedFile) => {
