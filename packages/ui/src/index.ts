@@ -33,4 +33,4 @@ export {
   recordHistoryEntry,
   type QueryHistoryEntry,
 } from "./query-history";
-export type { ViewKey } from "./components/view";
+export type { WorkspaceTab, WorkspaceTabKind } from "./components/workspace-tab";

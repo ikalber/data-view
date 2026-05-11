@@ -27,7 +27,7 @@ pub async fn test(c: &ResolvedConnection) -> AppResult<TestConnectionResult> {
     let start = Instant::now();
     match connect(c).await {
         Ok(mut conn) => {
-            let res: Result<Vec<u8>, _> = conn.query_first("SELECT 1").await;
+            let res: Result<Option<i64>, _> = conn.query_first("SELECT 1").await;
             let ok = res.is_ok();
             let latency = start.elapsed().as_millis() as u64;
             let _ = conn.disconnect().await;
@@ -144,19 +144,19 @@ pub async fn run_query(c: &ResolvedConnection, sql: &str) -> AppResult<QueryResu
     let mut affected: Option<u64> = None;
     let mut truncated = false;
 
-    while let Some(rs) = result.next_set().await {
-        let rs = rs?;
-        let cols = rs.columns_ref();
-        if all_columns.is_empty() {
-            all_columns = cols
-                .iter()
-                .map(|c| QueryResultColumn {
-                    name: c.name_str().to_string(),
-                    data_type: format!("{:?}", c.column_type()),
-                })
-                .collect();
+    while !result.is_empty() {
+        let cols_now: Vec<QueryResultColumn> = result
+            .columns_ref()
+            .iter()
+            .map(|c| QueryResultColumn {
+                name: c.name_str().to_string(),
+                data_type: format!("{:?}", c.column_type()),
+            })
+            .collect();
+        if all_columns.is_empty() && !cols_now.is_empty() {
+            all_columns = cols_now;
         }
-        let collected: Vec<Row> = rs.collect().await?;
+        let collected: Vec<Row> = result.collect().await?;
         if collected.is_empty() {
             affected = Some(result.affected_rows());
         }

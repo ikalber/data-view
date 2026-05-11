@@ -195,8 +195,9 @@ pub async fn run_query(c: &ResolvedConnection, sql: &str) -> AppResult<QueryResu
                 truncated = true;
                 break;
             }
-            let json_row: Vec<Value> = (0..row.columns().len())
-                .map(|i| column_to_json(row, i))
+            let json_row: Vec<Value> = row
+                .cells()
+                .map(|(_, cd)| coldata_to_json(cd))
                 .collect();
             all_rows.push(json_row);
         }
@@ -257,13 +258,6 @@ pub async fn fetch_table_data(
         limit
     );
     run_query(c, &sql).await
-}
-
-fn column_to_json(row: &Row, idx: usize) -> Value {
-    match row.try_get::<ColumnData<'_>, _>(idx) {
-        Ok(Some(cd)) => coldata_to_json(&cd),
-        _ => Value::Null,
-    }
 }
 
 fn coldata_to_json(cd: &ColumnData<'_>) -> Value {

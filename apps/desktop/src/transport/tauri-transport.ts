@@ -48,8 +48,14 @@ export const tauriTransport: Transport = {
     call<ConnectionOverview>("get_connection_overview", { connectionId }),
   describeTable: (connectionId, schema, name) =>
     call<TableDetails>("describe_table", { connectionId, schema, name }),
-  runQuery: (connectionId, sql, params) =>
-    call<QueryResult>("run_query", { connectionId, sql, params }),
+  runQuery: (connectionId, sql, options) =>
+    // The Rust side doesn't honor `schema` yet — it's ignored downstream.
+    call<QueryResult>("run_query", {
+      connectionId,
+      sql,
+      params: options?.params,
+      schema: options?.schema,
+    }),
   fetchTableData: (connectionId, schema, name, options?: PageOptions) =>
     call<QueryResult>("fetch_table_data", { connectionId, schema, name, options }),
 };

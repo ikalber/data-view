@@ -264,12 +264,15 @@ export const mssqlDriver: DriverAdapter = {
     });
   },
 
-  async runQuery(c, sqlText, _params) {
+  async runQuery(c, sqlText, options) {
+    const prefixed = options?.schema
+      ? `USE [${options.schema.replace(/]/g, "]]")}];\n${sqlText}`
+      : sqlText;
     const start = Date.now();
     return withPool(c, async (pool) => {
       const req = pool.request();
       req.arrayRowMode = true;
-      const r = await req.query(sqlText);
+      const r = await req.query(prefixed);
       const cols = (r.recordset?.columns ? Object.values(r.recordset.columns) : []) as Array<{
         name: string;
         type: { name: string };

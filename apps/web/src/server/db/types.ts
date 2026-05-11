@@ -4,6 +4,7 @@ import type {
   PageOptions,
   QueryResult,
   RelationInfo,
+  RunQueryOptions,
   SchemaInfo,
   TableDetails,
   TestConnectionResult,
@@ -20,7 +21,11 @@ export interface DriverAdapter {
   listRelations(conn: ResolvedConnection, schema?: string): Promise<RelationInfo[]>;
   getConnectionOverview(conn: ResolvedConnection): Promise<ConnectionOverview>;
   describeTable(conn: ResolvedConnection, schema: string, name: string): Promise<TableDetails>;
-  runQuery(conn: ResolvedConnection, sql: string, params?: unknown[]): Promise<QueryResult>;
+  runQuery(
+    conn: ResolvedConnection,
+    sql: string,
+    options?: RunQueryOptions,
+  ): Promise<QueryResult>;
   fetchTableData(
     conn: ResolvedConnection,
     schema: string,

@@ -74,10 +74,14 @@ export const webTransport: Transport = {
     http<TableDetails>(
       `/api/connections/${connectionId}/describe?schema=${encodeURIComponent(schema)}&name=${encodeURIComponent(name)}`,
     ),
-  runQuery: (connectionId, sql, params) =>
+  runQuery: (connectionId, sql, options) =>
     http<QueryResult>(`/api/connections/${connectionId}/query`, {
       method: "POST",
-      body: JSON.stringify({ sql, params }),
+      body: JSON.stringify({
+        sql,
+        schema: options?.schema,
+        params: options?.params,
+      }),
     }),
   fetchTableData: (connectionId, schema, name, options?: PageOptions) =>
     http<QueryResult>(`/api/connections/${connectionId}/table-data`, {

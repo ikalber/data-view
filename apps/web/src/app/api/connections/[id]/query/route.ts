@@ -8,13 +8,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   try {
     const userId = await requireUserId();
     const { id } = await ctx.params;
-    const body = (await req.json()) as { sql?: string; params?: unknown[] };
+    const body = (await req.json()) as {
+      sql?: string;
+      params?: unknown[];
+      schema?: string;
+    };
     if (!body.sql || typeof body.sql !== "string") {
       return NextResponse.json({ error: "sql es requerido" }, { status: 400 });
     }
     const conn = getConnectionWithSecret(userId, id);
     if (!conn) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    const result = await getAdapter(conn.driver).runQuery(conn, body.sql, body.params);
+    const result = await getAdapter(conn.driver).runQuery(conn, body.sql, {
+      schema: body.schema,
+      params: body.params,
+    });
     return NextResponse.json(result);
   } catch (e) {
     return fail(e);

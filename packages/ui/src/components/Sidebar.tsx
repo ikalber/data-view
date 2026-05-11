@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import type { DatabaseDriver, RelationInfo, SchemaInfo } from "@data-view/core";
 import { useTransport } from "../transport-context";
-import type { ViewKey } from "./view";
+import type { WorkspaceTab, WorkspaceTabKind } from "./workspace-tab";
 
 type Mode = "select" | "tree";
 const MODE_KEY = "dbview.tablesMode";
@@ -12,21 +12,24 @@ const MODE_KEY = "dbview.tablesMode";
 interface Props {
   connectionId: string | null;
   driver: DatabaseDriver | null;
-  view: ViewKey;
-  activeTable: { schema: string; name: string } | null;
+  activeTab: WorkspaceTab | null;
   activeSchema: string | null;
-  onChangeView: (v: ViewKey) => void;
   onChangeSchema: (schema: string) => void;
   onSchemasLoaded: (schemas: SchemaInfo[]) => void;
   onOpenTable: (schema: string, name: string) => void;
+  onOpenDatabase: (schema: string) => void;
+  onOpenConnectionOverview: () => void;
+  onOpenSql: () => void;
+  onOpenSchema: () => void;
+  onOpenHistory: () => void;
 }
 
-const NAV_ITEMS: { key: ViewKey; label: string; icon: string }[] = [
-  { key: "overview", label: "Overview", icon: "▤" },
-  { key: "sql", label: "SQL Editor", icon: "›_" },
-  { key: "schema", label: "Schema", icon: "◇" },
-  { key: "history", label: "History", icon: "↻" },
-];
+interface NavItem {
+  key: WorkspaceTabKind;
+  label: string;
+  icon: string;
+  onClick: () => void;
+}
 
 function readInitialMode(): Mode {
   if (typeof window === "undefined") return "select";
@@ -42,13 +45,16 @@ function readInitialMode(): Mode {
 export function Sidebar({
   connectionId,
   driver,
-  view,
-  activeTable,
+  activeTab,
   activeSchema,
-  onChangeView,
   onChangeSchema,
   onSchemasLoaded,
   onOpenTable,
+  onOpenDatabase,
+  onOpenConnectionOverview,
+  onOpenSql,
+  onOpenSchema,
+  onOpenHistory,
 }: Props) {
   const transport = useTransport();
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
@@ -61,11 +67,26 @@ export function Sidebar({
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>(() => readInitialMode());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [treeRelations, setTreeRelations] = useState<Record<string, RelationInfo[]>>(
-    {},
-  );
+  const [treeRelations, setTreeRelations] = useState<
+    Record<string, RelationInfo[]>
+  >({});
   const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  const navItems: NavItem[] = useMemo(
+    () => [
+      {
+        key: "connection-overview",
+        label: "Overview",
+        icon: "▤",
+        onClick: onOpenConnectionOverview,
+      },
+      { key: "sql", label: "SQL Editor", icon: "›_", onClick: onOpenSql },
+      { key: "schema", label: "Schema", icon: "◇", onClick: onOpenSchema },
+      { key: "history", label: "History", icon: "↻", onClick: onOpenHistory },
+    ],
+    [onOpenConnectionOverview, onOpenSql, onOpenSchema, onOpenHistory],
+  );
 
   // Persist mode preference
   useEffect(() => {
@@ -95,7 +116,9 @@ export function Sidebar({
         setSchemas(s);
         onSchemasLoaded(s);
       })
-      .catch((e) => !cancel && setError(e instanceof Error ? e.message : String(e)))
+      .catch(
+        (e) => !cancel && setError(e instanceof Error ? e.message : String(e)),
+      )
       .finally(() => !cancel && setLoadingSchemas(false));
     return () => {
       cancel = true;
@@ -124,10 +147,11 @@ export function Sidebar({
       .then((r) => {
         if (cancel) return;
         setRelations(r);
-        // populate the tree cache so switching modes is instant
         setTreeRelations((prev) => ({ ...prev, [activeSchema]: r }));
       })
-      .catch((e) => !cancel && setError(e instanceof Error ? e.message : String(e)))
+      .catch(
+        (e) => !cancel && setError(e instanceof Error ? e.message : String(e)),
+      )
       .finally(() => !cancel && setLoadingRelations(false));
     return () => {
       cancel = true;
@@ -164,8 +188,14 @@ export function Sidebar({
     };
   }, [pickerOpen]);
 
-  const userSchemas = useMemo(() => schemas.filter((s) => !s.isSystem), [schemas]);
-  const systemSchemas = useMemo(() => schemas.filter((s) => s.isSystem), [schemas]);
+  const userSchemas = useMemo(
+    () => schemas.filter((s) => !s.isSystem),
+    [schemas],
+  );
+  const systemSchemas = useMemo(
+    () => schemas.filter((s) => s.isSystem),
+    [schemas],
+  );
   const pickerLabel = driver === "mysql" ? "Database" : "Schema";
 
   const filteredPickerUser = useMemo(() => {
@@ -214,18 +244,40 @@ export function Sidebar({
     }
   }
 
+  /** Picking a database from the dropdown opens its overview tab AND seeds
+   * the sidebar so the tables list switches over. */
+  function selectDatabase(name: string) {
+    onChangeSchema(name);
+    onOpenDatabase(name);
+    setPickerOpen(false);
+    setPickerFilter("");
+  }
+
+  function isNavActive(key: WorkspaceTabKind): boolean {
+    if (!activeTab) return false;
+    return activeTab.kind === key;
+  }
+
+  function isTableActive(schema: string, name: string): boolean {
+    return (
+      activeTab?.kind === "table" &&
+      activeTab.schema === schema &&
+      activeTab.name === name
+    );
+  }
+
   return (
     <aside className="dv-sidebar">
       <nav className="dv-nav-group">
         <div className="dv-nav-group-label">Workspace</div>
-        {NAV_ITEMS.map((item) => (
+        {navItems.map((item) => (
           <div
             key={item.key}
             className={clsx(
               "dv-nav-item",
-              view === item.key && !activeTable && "is-active",
+              isNavActive(item.key) && "is-active",
             )}
-            onClick={() => onChangeView(item.key)}
+            onClick={item.onClick}
             role="button"
             tabIndex={0}
           >
@@ -239,7 +291,11 @@ export function Sidebar({
         <div className="dv-schema-picker" ref={pickerRef}>
           <div className="dv-schema-picker-label-row">
             <span className="dv-schema-picker-label">{pickerLabel}</span>
-            <div className="dv-mode-toggle" role="group" aria-label="Modo de navegación">
+            <div
+              className="dv-mode-toggle"
+              role="group"
+              aria-label="Modo de navegación"
+            >
               <button
                 type="button"
                 title="Modo selección — elegí una database y ves sus tablas"
@@ -283,7 +339,9 @@ export function Sidebar({
                   : "Elegí una"}
               </span>
               {activeSchema && relations.length > 0 && (
-                <span className="dv-schema-picker-count">{relations.length}</span>
+                <span className="dv-schema-picker-count">
+                  {relations.length}
+                </span>
               )}
               <span className="dv-schema-picker-icon">▾</span>
             </button>
@@ -312,11 +370,7 @@ export function Sidebar({
                     "dv-schema-picker-option",
                     s.name === activeSchema && "is-active",
                   )}
-                  onClick={() => {
-                    onChangeSchema(s.name);
-                    setPickerOpen(false);
-                    setPickerFilter("");
-                  }}
+                  onClick={() => selectDatabase(s.name)}
                 >
                   <span className="dv-schema-picker-option-check">
                     {s.name === activeSchema ? "✓" : ""}
@@ -336,11 +390,7 @@ export function Sidebar({
                         "dv-schema-picker-option",
                         s.name === activeSchema && "is-active",
                       )}
-                      onClick={() => {
-                        onChangeSchema(s.name);
-                        setPickerOpen(false);
-                        setPickerFilter("");
-                      }}
+                      onClick={() => selectDatabase(s.name)}
                     >
                       <span className="dv-schema-picker-option-check">
                         {s.name === activeSchema ? "✓" : ""}
@@ -365,9 +415,7 @@ export function Sidebar({
       {mode === "select" ? (
         <div className="dv-tables-section">
           <div className="dv-tables-header">
-            <span>
-              Tablas{activeSchema ? ` · ${relations.length}` : ""}
-            </span>
+            <span>Tablas{activeSchema ? ` · ${relations.length}` : ""}</span>
           </div>
           {activeSchema && relations.length > 8 && (
             <div className="dv-tables-search">
@@ -411,10 +459,7 @@ export function Sidebar({
                 </div>
               )}
             {sorted.map((r) => {
-              const isActive =
-                view === "table" &&
-                activeTable?.schema === r.schema &&
-                activeTable?.name === r.name;
+              const isActive = isTableActive(r.schema, r.name);
               return (
                 <div
                   key={`${r.schema}.${r.name}`}
@@ -463,7 +508,11 @@ export function Sidebar({
             userSchemas.length === 0 &&
             systemSchemas.length === 0 && (
               <div className="dv-empty" style={{ padding: 16, fontSize: 12 }}>
-                Sin {pickerLabel.toLowerCase() === "database" ? "databases" : "schemas"}.
+                Sin{" "}
+                {pickerLabel.toLowerCase() === "database"
+                  ? "databases"
+                  : "schemas"}
+                .
               </div>
             )}
           {[...userSchemas, ...systemSchemas].map((s) => {
@@ -480,7 +529,8 @@ export function Sidebar({
                     s.isSystem && "is-system",
                   )}
                   onClick={() => {
-                    if (!isExpanded) onChangeSchema(s.name);
+                    onChangeSchema(s.name);
+                    onOpenDatabase(s.name);
                     void toggleExpand(s.name);
                   }}
                 >
@@ -489,9 +539,7 @@ export function Sidebar({
                   </span>
                   <span>{s.name}</span>
                   {rels && (
-                    <span className="dv-schema-tree-count">
-                      {rels.length}
-                    </span>
+                    <span className="dv-schema-tree-count">{rels.length}</span>
                   )}
                 </div>
                 {isExpanded && (
@@ -503,10 +551,7 @@ export function Sidebar({
                       <div className="dv-schema-tree-loading">sin tablas</div>
                     )}
                     {(rels ?? []).map((r) => {
-                      const isActive =
-                        view === "table" &&
-                        activeTable?.schema === r.schema &&
-                        activeTable?.name === r.name;
+                      const isActive = isTableActive(r.schema, r.name);
                       return (
                         <div
                           key={`${r.schema}.${r.name}`}

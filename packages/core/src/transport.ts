@@ -43,13 +43,24 @@ export interface Transport {
   getConnectionOverview(connectionId: string): Promise<ConnectionOverview>;
   describeTable(connectionId: string, schema: string, name: string): Promise<TableDetails>;
 
-  runQuery(connectionId: string, sql: string, params?: unknown[]): Promise<QueryResult>;
+  runQuery(
+    connectionId: string,
+    sql: string,
+    options?: RunQueryOptions,
+  ): Promise<QueryResult>;
   fetchTableData(
     connectionId: string,
     schema: string,
     name: string,
     options?: PageOptions,
   ): Promise<QueryResult>;
+}
+
+export interface RunQueryOptions {
+  /** Override the active database/schema for this query. The adapter handles
+   * it driver-specifically (USE in MySQL/MSSQL, search_path in Postgres). */
+  schema?: string;
+  params?: unknown[];
 }
 
 export class TransportError extends Error {

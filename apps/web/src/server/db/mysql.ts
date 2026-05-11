@@ -101,16 +101,32 @@ export const mysqlDriver: DriverAdapter = {
   async getConnectionOverview(c) {
     return withConn(c, async (conn) => {
       const SYS = new Set(["information_schema", "mysql", "performance_schema", "sys"]);
+      // CURRENT_USER and UPTIME are reserved/non-existent as system variables in
+      // MySQL 8 — alias with backticks and read Uptime from STATUS instead of
+      // `@@global.uptime` (which doesn't exist as a system variable).
       const [[meta]] = (await conn.query(
         `SELECT VERSION() AS version,
                 DATABASE() AS current_database,
-                CURRENT_USER() AS current_user,
+                CURRENT_USER() AS \`current_user\`,
                 NOW() AS server_time,
-                @@global.uptime AS uptime_seconds,
                 @@max_connections AS max_connections`,
       )) as [Array<unknown[]>, unknown];
-      const [version, currentDb, currentUser, serverTime, uptime, maxConn] =
+      const [version, currentDb, currentUser, serverTime, maxConn] =
         (meta as unknown[]) ?? [];
+
+      // Uptime lives in SHOW GLOBAL STATUS. Wrap so a privilege error doesn't
+      // sink the whole overview.
+      let uptime: number | undefined;
+      try {
+        const [statusRows] = (await conn.query(
+          `SHOW GLOBAL STATUS LIKE 'Uptime'`,
+        )) as [Array<unknown[]>, unknown];
+        const row = statusRows[0] as unknown[] | undefined;
+        const v = row?.[1];
+        if (v != null) uptime = Number(v);
+      } catch {
+        /* user lacks PROCESS or similar — fine, leave uptime undefined. */
+      }
 
       // information_schema.schemata gives the list, then aggregate sizes from
       // information_schema.tables in one round-trip.
@@ -125,9 +141,15 @@ export const mysqlDriver: DriverAdapter = {
          ORDER BY s.schema_name`,
       )) as [Array<unknown[]>, unknown];
 
-      const [activeRows] = (await conn.query(
-        `SELECT COUNT(*) AS active FROM information_schema.processlist`,
-      )) as [Array<unknown[]>, unknown];
+      let active: unknown;
+      try {
+        const [activeRows] = (await conn.query(
+          `SELECT COUNT(*) AS active FROM information_schema.processlist`,
+        )) as [Array<unknown[]>, unknown];
+        active = (activeRows[0] as unknown[] | undefined)?.[0];
+      } catch {
+        /* requires PROCESS privilege — leave undefined. */
+      }
 
       const databases = dbRows.map((row) => {
         const [name, sizeBytes, relCount, charset] = row as [
@@ -149,7 +171,6 @@ export const mysqlDriver: DriverAdapter = {
         (sum, d) => sum + (d.sizeBytes ?? 0),
         0,
       );
-      const active = (activeRows[0] as unknown[] | undefined)?.[0];
 
       return {
         driver: "mysql" as const,
@@ -228,10 +249,16 @@ export const mysqlDriver: DriverAdapter = {
     });
   },
 
-  async runQuery(c, sql, params) {
+  async runQuery(c, sql, options) {
     const start = Date.now();
     return withConn(c, async (conn) => {
-      const [rows, fields] = (await conn.query({ sql, values: params })) as [unknown, mysql.FieldPacket[] | undefined];
+      if (options?.schema) {
+        await conn.query(`USE ${"`" + options.schema.replace(/`/g, "``") + "`"}`);
+      }
+      const [rows, fields] = (await conn.query({
+        sql,
+        values: options?.params,
+      })) as [unknown, mysql.FieldPacket[] | undefined];
 
       // For SELECT-style queries `rows` is an array of arrays (rowsAsArray=true).
       // For DML it's an OkPacket-like object.
@@ -272,7 +299,7 @@ export const mysqlDriver: DriverAdapter = {
       : "";
     const where = options?.where?.trim() ? `WHERE ${options.where.trim()}` : "";
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT ? OFFSET ?`;
-    return this.runQuery(c, sql, [limit, offset]);
+    return this.runQuery(c, sql, { params: [limit, offset] });
   },
 };
 

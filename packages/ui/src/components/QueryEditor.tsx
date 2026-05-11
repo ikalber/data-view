@@ -7,161 +7,121 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import clsx from "clsx";
-import type { QueryResult } from "@data-view/core";
+import type { DatabaseDriver, QueryResult, SchemaInfo } from "@data-view/core";
 import { useTransport } from "../transport-context";
 import { recordHistoryEntry } from "../query-history";
 import { ResultsTable } from "./ResultsTable";
 
-interface SavedFile {
+export interface SavedFile {
   id: string;
   name: string;
   sql: string;
   updatedAt: string;
 }
 
-interface QueryTab {
-  id: string;
-  title: string;
+interface Props {
+  connectionId: string;
+  /** This tab's id — used as a stable key for runtime state. */
+  tabId: string;
+  /** Current SQL text of this tab. */
   sql: string;
-  /** Linked saved-file id; null when tab is unsaved. */
+  /** Updates the parent tab's SQL. */
+  onChangeSql: (sql: string) => void;
+  /** Display title for the tab; used as a default name when saving. */
+  title: string;
+  /** Linked saved-file id; null when the tab is unsaved. */
   fileId: string | null;
+  /** Saved scripts available for this connection. */
+  files: SavedFile[];
+  /** Save the current SQL as a new file (or overwrite the linked file).
+   * Returns the resulting fileId so the caller can update the tab. */
+  onSave: (info: {
+    tabId: string;
+    title: string;
+    sql: string;
+    fileId: string | null;
+  }) => { fileId: string; title: string } | null;
+  /** Open a saved file in a new tab. */
+  onOpenFile: (file: SavedFile) => void;
+  /** Delete a saved file. */
+  onDeleteFile: (file: SavedFile) => void;
+  /** Whether this editor is the currently visible tab. */
+  isActive: boolean;
+  /** Database/schema the script targets; null = connection default. */
+  database: string | null;
+  /** Updates the parent tab's database. */
+  onChangeDatabase: (database: string | null) => void;
+  /** All schemas/databases the user can pick. */
+  schemas: SchemaInfo[];
+  driver: DatabaseDriver | null;
 }
 
-interface TabRuntime {
+interface Runtime {
   result: QueryResult | null;
   error: string | null;
   running: boolean;
 }
 
-interface Props {
-  connectionId: string;
-  /** Bumping `nonce` opens a new tab seeded with `sql`. */
-  seed?: { sql: string; nonce: number } | null;
-}
-
-const TABS_KEY = (id: string) => `dbview.sqlTabs.${id}`;
-const ACTIVE_KEY = (id: string) => `dbview.sqlActiveTab.${id}`;
-const FILES_KEY = (id: string) => `dbview.sqlFiles.${id}`;
-
-function uid(): string {
-  return Math.random().toString(36).slice(2, 10);
-}
-
-function readJSON<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJSON(key: string, value: unknown) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* ignore */
-  }
-}
-
-function untitledName(tabs: QueryTab[]): string {
-  const taken = new Set(tabs.map((t) => t.title));
-  let n = 1;
-  while (taken.has(`Sin título ${n}`)) n++;
-  return `Sin título ${n}`;
-}
-
-const EMPTY_RUNTIME: TabRuntime = { result: null, error: null, running: false };
-
-export function QueryEditor({ connectionId, seed }: Props) {
+export function QueryEditor({
+  connectionId,
+  tabId,
+  sql,
+  onChangeSql,
+  title,
+  fileId,
+  files,
+  onSave,
+  onOpenFile,
+  onDeleteFile,
+  isActive,
+  database,
+  onChangeDatabase,
+  schemas,
+  driver,
+}: Props) {
   const transport = useTransport();
-  const [tabs, setTabs] = useState<QueryTab[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [files, setFiles] = useState<SavedFile[]>([]);
-  const [runtime, setRuntime] = useState<Record<string, TabRuntime>>({});
+  const [runtime, setRuntime] = useState<Runtime>({
+    result: null,
+    error: null,
+    running: false,
+  });
   const [filesOpen, setFilesOpen] = useState(false);
-  // Connection id whose tabs/files have been hydrated into state. The persist
-  // effects gate on this so a stale render right after a connection switch
-  // doesn't clobber the new connection's storage.
-  const [hydratedFor, setHydratedFor] = useState<string | null>(null);
-  const seenSeedRef = useRef<number | null>(null);
+  const [dbPickerOpen, setDbPickerOpen] = useState(false);
+  const [dbFilter, setDbFilter] = useState("");
   const filesMenuRef = useRef<HTMLDivElement>(null);
+  const dbMenuRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load tabs/files when connection changes.
-  useEffect(() => {
-    const loadedTabs = readJSON<QueryTab[]>(TABS_KEY(connectionId), []);
-    const loadedActive = readJSON<string | null>(ACTIVE_KEY(connectionId), null);
-    const loadedFiles = readJSON<SavedFile[]>(FILES_KEY(connectionId), []);
-    if (loadedTabs.length === 0) {
-      const t: QueryTab = {
-        id: uid(),
-        title: "Sin título 1",
-        sql: "",
-        fileId: null,
-      };
-      setTabs([t]);
-      setActiveId(t.id);
-    } else {
-      setTabs(loadedTabs);
-      const first = loadedTabs[0];
-      setActiveId(
-        loadedActive && loadedTabs.some((t) => t.id === loadedActive)
-          ? loadedActive
-          : first
-          ? first.id
-          : null,
-      );
-    }
-    setFiles(loadedFiles);
-    setRuntime({});
-    seenSeedRef.current = null;
-    setHydratedFor(connectionId);
-  }, [connectionId]);
-
-  // Persist tabs/active/files only after state has been hydrated for the
-  // current connection.
-  useEffect(() => {
-    if (hydratedFor !== connectionId) return;
-    writeJSON(TABS_KEY(connectionId), tabs);
-  }, [hydratedFor, connectionId, tabs]);
-  useEffect(() => {
-    if (hydratedFor !== connectionId || activeId == null) return;
-    writeJSON(ACTIVE_KEY(connectionId), activeId);
-  }, [hydratedFor, connectionId, activeId]);
-  useEffect(() => {
-    if (hydratedFor !== connectionId) return;
-    writeJSON(FILES_KEY(connectionId), files);
-  }, [hydratedFor, connectionId, files]);
-
-  // Open a fresh tab whenever a new seed nonce arrives.
-  useEffect(() => {
-    if (!seed) return;
-    if (seenSeedRef.current === seed.nonce) return;
-    seenSeedRef.current = seed.nonce;
-    setTabs((prev) => {
-      const t: QueryTab = {
-        id: uid(),
-        title: untitledName(prev),
-        sql: seed.sql,
-        fileId: null,
-      };
-      setActiveId(t.id);
-      return [...prev, t];
-    });
-  }, [seed]);
+  const dbLabel = driver === "postgres" ? "Schema" : "Database";
+  const userSchemas = useMemo(
+    () => schemas.filter((s) => !s.isSystem),
+    [schemas],
+  );
+  const systemSchemas = useMemo(
+    () => schemas.filter((s) => s.isSystem),
+    [schemas],
+  );
+  const filteredUser = useMemo(() => {
+    const q = dbFilter.trim().toLowerCase();
+    if (!q) return userSchemas;
+    return userSchemas.filter((s) => s.name.toLowerCase().includes(q));
+  }, [dbFilter, userSchemas]);
+  const filteredSystem = useMemo(() => {
+    const q = dbFilter.trim().toLowerCase();
+    if (!q) return systemSchemas;
+    return systemSchemas.filter((s) => s.name.toLowerCase().includes(q));
+  }, [dbFilter, systemSchemas]);
 
   // Click-outside / Esc closes the files popover.
   useEffect(() => {
     if (!filesOpen) return;
     const onClick = (e: MouseEvent) => {
-      if (filesMenuRef.current && !filesMenuRef.current.contains(e.target as Node)) {
+      if (
+        filesMenuRef.current &&
+        !filesMenuRef.current.contains(e.target as Node)
+      ) {
         setFilesOpen(false);
       }
     };
@@ -176,21 +136,23 @@ export function QueryEditor({ connectionId, seed }: Props) {
     };
   }, [filesOpen]);
 
-  const active = useMemo(
-    () => tabs.find((t) => t.id === activeId) ?? null,
-    [tabs, activeId],
-  );
-  const activeRuntime: TabRuntime =
-    (active && runtime[active.id]) || EMPTY_RUNTIME;
-
-  const isDirty = useCallback(
-    (t: QueryTab) => {
-      if (t.fileId == null) return t.sql.length > 0;
-      const f = files.find((x) => x.id === t.fileId);
-      return !f || f.sql !== t.sql;
-    },
-    [files],
-  );
+  useEffect(() => {
+    if (!dbPickerOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (dbMenuRef.current && !dbMenuRef.current.contains(e.target as Node)) {
+        setDbPickerOpen(false);
+      }
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setDbPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [dbPickerOpen]);
 
   const sortedFiles = useMemo(
     () =>
@@ -201,145 +163,15 @@ export function QueryEditor({ connectionId, seed }: Props) {
     [files],
   );
 
-  const newTab = useCallback((seedSql = "") => {
-    setTabs((prev) => {
-      const t: QueryTab = {
-        id: uid(),
-        title: untitledName(prev),
-        sql: seedSql,
-        fileId: null,
-      };
-      setActiveId(t.id);
-      return [...prev, t];
-    });
-    setTimeout(() => textareaRef.current?.focus(), 0);
-  }, []);
-
-  const closeTab = useCallback(
-    (id: string) => {
-      const target = tabs.find((t) => t.id === id);
-      if (!target) return;
-      if (isDirty(target)) {
-        const ok = window.confirm(
-          `Tenés cambios sin guardar en "${target.title}". ¿Cerrar igual?`,
-        );
-        if (!ok) return;
-      }
-      setTabs((prev) => {
-        const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) return prev;
-        const next = prev.filter((t) => t.id !== id);
-        if (next.length === 0) {
-          const t: QueryTab = {
-            id: uid(),
-            title: "Sin título 1",
-            sql: "",
-            fileId: null,
-          };
-          setActiveId(t.id);
-          return [t];
-        }
-        if (id === activeId) {
-          const fallback = next[Math.max(0, idx - 1)] ?? next[0];
-          if (fallback) setActiveId(fallback.id);
-        }
-        return next;
-      });
-      setRuntime((r) => {
-        if (!(id in r)) return r;
-        const { [id]: _drop, ...rest } = r;
-        return rest;
-      });
-    },
-    [tabs, activeId, isDirty],
-  );
-
-  const updateActiveSql = useCallback(
-    (sql: string) => {
-      if (!active) return;
-      setTabs((prev) =>
-        prev.map((t) => (t.id === active.id ? { ...t, sql } : t)),
-      );
-    },
-    [active],
-  );
-
-  const saveActive = useCallback(() => {
-    if (!active) return;
-    if (active.fileId == null) {
-      const def = active.title.startsWith("Sin título") ? "" : active.title;
-      const name = window.prompt("Nombre del archivo:", def);
-      if (!name || !name.trim()) return;
-      const trimmed = name.trim();
-      const id = uid();
-      const file: SavedFile = {
-        id,
-        name: trimmed,
-        sql: active.sql,
-        updatedAt: new Date().toISOString(),
-      };
-      setFiles((prev) => [file, ...prev]);
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.id === active.id ? { ...t, fileId: id, title: trimmed } : t,
-        ),
-      );
-    } else {
-      const fileId = active.fileId;
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === fileId
-            ? { ...f, sql: active.sql, updatedAt: new Date().toISOString() }
-            : f,
-        ),
-      );
-    }
-  }, [active]);
-
-  const openFile = useCallback(
-    (file: SavedFile) => {
-      setFilesOpen(false);
-      const existing = tabs.find((t) => t.fileId === file.id);
-      if (existing) {
-        setActiveId(existing.id);
-        return;
-      }
-      const t: QueryTab = {
-        id: uid(),
-        title: file.name,
-        sql: file.sql,
-        fileId: file.id,
-      };
-      setTabs((prev) => [...prev, t]);
-      setActiveId(t.id);
-    },
-    [tabs],
-  );
-
-  const deleteFile = useCallback((file: SavedFile) => {
-    const ok = window.confirm(`¿Borrar "${file.name}"?`);
-    if (!ok) return;
-    setFiles((prev) => prev.filter((f) => f.id !== file.id));
-    setTabs((prev) =>
-      prev.map((t) => (t.fileId === file.id ? { ...t, fileId: null } : t)),
-    );
-  }, []);
-
   const run = useCallback(async () => {
-    if (!active || activeRuntime.running) return;
-    const sql = active.sql;
+    if (runtime.running) return;
     if (!sql.trim()) return;
-    const tabId = active.id;
-    setRuntime((r) => ({
-      ...r,
-      [tabId]: { result: r[tabId]?.result ?? null, error: null, running: true },
-    }));
+    setRuntime((r) => ({ result: r.result, error: null, running: true }));
     try {
-      const result = await transport.runQuery(connectionId, sql);
-      setRuntime((r) => ({
-        ...r,
-        [tabId]: { result, error: null, running: false },
-      }));
+      const result = await transport.runQuery(connectionId, sql, {
+        schema: database ?? undefined,
+      });
+      setRuntime({ result, error: null, running: false });
       recordHistoryEntry({
         connectionId,
         sql,
@@ -351,10 +183,7 @@ export function QueryEditor({ connectionId, seed }: Props) {
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      setRuntime((r) => ({
-        ...r,
-        [tabId]: { result: null, error: message, running: false },
-      }));
+      setRuntime({ result: null, error: message, running: false });
       recordHistoryEntry({
         connectionId,
         sql,
@@ -362,7 +191,16 @@ export function QueryEditor({ connectionId, seed }: Props) {
         error: message,
       });
     }
-  }, [active, activeRuntime.running, transport, connectionId]);
+  }, [runtime.running, transport, connectionId, sql, database]);
+
+  const saveActive = useCallback(() => {
+    onSave({ tabId, title, sql, fileId });
+  }, [onSave, tabId, title, sql, fileId]);
+
+  // Keep the runtime relevant when the connection or SQL is dropped.
+  useEffect(() => {
+    setRuntime({ result: null, error: null, running: false });
+  }, [connectionId]);
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -376,64 +214,152 @@ export function QueryEditor({ connectionId, seed }: Props) {
     }
   }
 
-  function onTabMouseDown(e: ReactMouseEvent<HTMLDivElement>, id: string) {
-    if (e.button === 1) {
-      e.preventDefault();
-      closeTab(id);
+  // Focus when this tab becomes active.
+  useEffect(() => {
+    if (isActive) {
+      // Defer so the pane is visible before focusing.
+      const t = setTimeout(() => textareaRef.current?.focus(), 0);
+      return () => clearTimeout(t);
     }
-  }
+  }, [isActive]);
 
   return (
-    <>
-      <div className="dv-sql-tabs">
-        <div className="dv-sql-tab-list" role="tablist">
-          {tabs.map((t) => {
-            const isActive = t.id === activeId;
-            const dirty = isDirty(t);
-            return (
-              <div
-                key={t.id}
-                role="tab"
-                aria-selected={isActive}
-                tabIndex={0}
-                className={clsx("dv-sql-tab", isActive && "is-active")}
-                onClick={() => setActiveId(t.id)}
-                onMouseDown={(e) => onTabMouseDown(e, t.id)}
-                title={t.fileId ? `Archivo: ${t.title}` : t.title}
-              >
-                <span className="dv-sql-tab-icon">
-                  {t.fileId ? "▤" : "›_"}
-                </span>
-                <span className="dv-sql-tab-title">{t.title}</span>
-                {dirty && (
-                  <span className="dv-sql-tab-dot" aria-label="sin guardar">
-                    •
-                  </span>
-                )}
-                <button
-                  type="button"
-                  className="dv-sql-tab-close"
-                  aria-label="Cerrar pestaña"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTab(t.id);
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            );
-          })}
+    <div className="dv-sql-pane">
+      <div className="dv-toolbar">
+        <div className="dv-sql-db-picker" ref={dbMenuRef}>
           <button
             type="button"
-            className="dv-sql-tab-new"
-            onClick={() => newTab()}
-            title="Nueva pestaña"
-            aria-label="Nueva pestaña"
+            className={clsx(
+              "dv-sql-db-trigger",
+              !database && "is-empty",
+              dbPickerOpen && "is-open",
+            )}
+            onClick={() => setDbPickerOpen((o) => !o)}
+            disabled={schemas.length === 0}
+            aria-haspopup="listbox"
+            aria-expanded={dbPickerOpen}
+            title={
+              database
+                ? `Ejecutar en ${dbLabel.toLowerCase()} "${database}"`
+                : `Sin ${dbLabel.toLowerCase()} seleccionada — usa el default de la conexión`
+            }
           >
-            +
+            <span className="dv-sql-db-trigger-icon">⛁</span>
+            <span className="dv-sql-db-trigger-name">
+              {database ?? `(${dbLabel.toLowerCase()} default)`}
+            </span>
+            <span className="dv-sql-db-trigger-caret">▾</span>
           </button>
+          {dbPickerOpen && (
+            <div className="dv-sql-db-popover" role="listbox">
+              {schemas.length > 6 && (
+                <div className="dv-sql-db-search">
+                  <input
+                    type="search"
+                    className="dv-input"
+                    placeholder={`Filtrar ${dbLabel.toLowerCase()}…`}
+                    value={dbFilter}
+                    onChange={(e) => setDbFilter(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+              )}
+              <div
+                role="option"
+                aria-selected={database == null}
+                className={clsx(
+                  "dv-sql-db-option",
+                  database == null && "is-active",
+                )}
+                onClick={() => {
+                  onChangeDatabase(null);
+                  setDbPickerOpen(false);
+                  setDbFilter("");
+                }}
+              >
+                <span className="dv-sql-db-option-check">
+                  {database == null ? "✓" : ""}
+                </span>
+                <span style={{ flex: 1, fontStyle: "italic" }}>
+                  default de la conexión
+                </span>
+              </div>
+              {filteredUser.map((s) => (
+                <div
+                  key={s.name}
+                  role="option"
+                  aria-selected={s.name === database}
+                  className={clsx(
+                    "dv-sql-db-option",
+                    s.name === database && "is-active",
+                  )}
+                  onClick={() => {
+                    onChangeDatabase(s.name);
+                    setDbPickerOpen(false);
+                    setDbFilter("");
+                  }}
+                >
+                  <span className="dv-sql-db-option-check">
+                    {s.name === database ? "✓" : ""}
+                  </span>
+                  <span style={{ flex: 1 }}>{s.name}</span>
+                </div>
+              ))}
+              {filteredSystem.length > 0 && (
+                <>
+                  <div className="dv-sql-db-section-label">Sistema</div>
+                  {filteredSystem.map((s) => (
+                    <div
+                      key={s.name}
+                      role="option"
+                      aria-selected={s.name === database}
+                      className={clsx(
+                        "dv-sql-db-option",
+                        s.name === database && "is-active",
+                      )}
+                      onClick={() => {
+                        onChangeDatabase(s.name);
+                        setDbPickerOpen(false);
+                        setDbFilter("");
+                      }}
+                    >
+                      <span className="dv-sql-db-option-check">
+                        {s.name === database ? "✓" : ""}
+                      </span>
+                      <span style={{ flex: 1 }}>{s.name}</span>
+                      <span className="dv-sql-db-option-tag">sys</span>
+                    </div>
+                  ))}
+                </>
+              )}
+              {filteredUser.length === 0 && filteredSystem.length === 0 && (
+                <div className="dv-empty" style={{ padding: 14, fontSize: 12 }}>
+                  Sin resultados.
+                </div>
+              )}
+            </div>
+          )}
         </div>
+        <button
+          className="dv-button is-primary"
+          onClick={run}
+          disabled={runtime.running}
+        >
+          {runtime.running ? "Ejecutando…" : "Run"}
+          <span className="dv-kbd" style={{ marginLeft: 4 }}>
+            ⌘⏎
+          </span>
+        </button>
+        <button
+          className="dv-button"
+          onClick={saveActive}
+          title={fileId ? `Guardar "${title}"` : "Guardar como archivo"}
+        >
+          Guardar
+          <span className="dv-kbd" style={{ marginLeft: 4 }}>
+            ⌘S
+          </span>
+        </button>
         <div className="dv-sql-files" ref={filesMenuRef}>
           <button
             type="button"
@@ -460,8 +386,13 @@ export function QueryEditor({ connectionId, seed }: Props) {
                     key={f.id}
                     role="menuitem"
                     className="dv-sql-file-row"
-                    onClick={() => openFile(f)}
-                    title={`Actualizado ${new Date(f.updatedAt).toLocaleString()}`}
+                    onClick={() => {
+                      setFilesOpen(false);
+                      onOpenFile(f);
+                    }}
+                    title={`Actualizado ${new Date(
+                      f.updatedAt,
+                    ).toLocaleString()}`}
                   >
                     <span className="dv-sql-file-row-icon">▤</span>
                     <span className="dv-sql-file-row-name">{f.name}</span>
@@ -471,7 +402,7 @@ export function QueryEditor({ connectionId, seed }: Props) {
                       aria-label="Borrar archivo"
                       onClick={(e) => {
                         e.stopPropagation();
-                        deleteFile(f);
+                        onDeleteFile(f);
                       }}
                     >
                       ×
@@ -482,67 +413,42 @@ export function QueryEditor({ connectionId, seed }: Props) {
             </div>
           )}
         </div>
-      </div>
-
-      <div className="dv-toolbar">
-        <button
-          className="dv-button is-primary"
-          onClick={run}
-          disabled={!active || activeRuntime.running}
-        >
-          {activeRuntime.running ? "Ejecutando…" : "Run"}
-          <span className="dv-kbd" style={{ marginLeft: 4 }}>⌘⏎</span>
-        </button>
-        <button
-          className="dv-button"
-          onClick={saveActive}
-          disabled={!active}
-          title={
-            active?.fileId
-              ? `Guardar "${active.title}"`
-              : "Guardar como archivo"
-          }
-        >
-          Guardar
-          <span className="dv-kbd" style={{ marginLeft: 4 }}>⌘S</span>
-        </button>
         <span className="dv-toolbar-meta">
-          {activeRuntime.result
-            ? `${activeRuntime.result.rowCount} filas · ${activeRuntime.result.durationMs}ms${
-                activeRuntime.result.truncated ? " · truncado" : ""
+          {runtime.result
+            ? `${runtime.result.rowCount} filas · ${runtime.result.durationMs}ms${
+                runtime.result.truncated ? " · truncado" : ""
               }`
-            : active?.fileId
-            ? `Archivo: ${active.title}`
+            : fileId
+            ? `Archivo: ${title}`
             : "SQL editor"}
         </span>
       </div>
       <div className="dv-editor">
         <textarea
           ref={textareaRef}
-          value={active?.sql ?? ""}
-          onChange={(e) => updateActiveSql(e.target.value)}
+          value={sql}
+          onChange={(e) => onChangeSql(e.target.value)}
           onKeyDown={onKeyDown}
           spellCheck={false}
           placeholder="-- Escribí tu SQL acá. Ctrl+Enter para ejecutar, Ctrl+S para guardar."
-          disabled={!active}
         />
       </div>
       <div className="dv-results">
         <div className="dv-results-header">
-          {activeRuntime.error
+          {runtime.error
             ? "Error"
-            : activeRuntime.result
-            ? `${activeRuntime.result.rowCount} filas`
+            : runtime.result
+            ? `${runtime.result.rowCount} filas`
             : "Resultados"}
         </div>
         <div className="dv-results-body">
-          {activeRuntime.error ? (
-            <div className="dv-error">{activeRuntime.error}</div>
+          {runtime.error ? (
+            <div className="dv-error">{runtime.error}</div>
           ) : (
-            <ResultsTable result={activeRuntime.result} />
+            <ResultsTable result={runtime.result} />
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

@@ -4168,8 +4168,6 @@ input[type="checkbox"]:disabled:checked {
   position: relative;
   display: flex;
   align-items: center;
-  padding: 0 8px;
-  border-left: 1px solid var(--dv-border);
 }
 
 .dv-sql-files-trigger {
@@ -4265,4 +4263,387 @@ input[type="checkbox"]:disabled:checked {
 .dv-sql-file-row-del:hover {
   color: var(--dv-danger);
   background: var(--dv-bg);
+}
+
+/* ── Workspace tab bar ────────────────────────────────────────────────────── */
+.dv-ws-tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--dv-panel);
+  border-bottom: 1px solid var(--dv-border);
+  min-height: 34px;
+}
+
+.dv-ws-tab-list {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.dv-ws-tab-list::-webkit-scrollbar {
+  height: 0;
+}
+
+.dv-ws-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border-right: 1px solid var(--dv-border);
+  cursor: pointer;
+  color: var(--dv-text-mute);
+  font-family: var(--dv-font-ui);
+  font-size: 12px;
+  background: transparent;
+  max-width: 220px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.dv-ws-tab:hover {
+  color: var(--dv-text);
+  background: var(--dv-panel-2);
+}
+
+.dv-ws-tab.is-active {
+  color: var(--dv-text);
+  background: var(--dv-bg);
+  box-shadow: inset 0 -2px 0 var(--dv-accent);
+}
+
+.dv-ws-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--dv-focus-ring);
+}
+
+.dv-ws-tab-icon {
+  color: var(--dv-text-mute);
+  font-family: var(--dv-mono);
+  font-size: 11px;
+}
+
+.dv-ws-tab.is-active .dv-ws-tab-icon {
+  color: var(--dv-accent);
+}
+
+.dv-ws-tab-icon.is-kind-table {
+  color: var(--dv-accent);
+}
+
+.dv-ws-tab-icon.is-kind-database-overview,
+.dv-ws-tab-icon.is-kind-connection-overview {
+  color: var(--dv-text);
+}
+
+.dv-ws-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.dv-ws-tab-dot {
+  color: var(--dv-accent);
+  line-height: 1;
+  font-size: 14px;
+}
+
+.dv-ws-tab-close {
+  background: transparent;
+  border: none;
+  color: var(--dv-text-mute);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 3px;
+  margin-left: 2px;
+}
+
+.dv-ws-tab-close:hover {
+  background: var(--dv-panel-2);
+  color: var(--dv-text);
+}
+
+.dv-ws-tab.is-active .dv-ws-tab-close:hover {
+  background: var(--dv-panel);
+}
+
+.dv-ws-tab-new {
+  background: transparent;
+  border: none;
+  color: var(--dv-text-mute);
+  cursor: pointer;
+  padding: 0 12px;
+  font-size: 16px;
+  line-height: 1;
+  font-family: var(--dv-font-ui);
+}
+
+.dv-ws-tab-new:hover {
+  color: var(--dv-text);
+  background: var(--dv-panel-2);
+}
+
+/* ── Workspace pane container ─────────────────────────────────────────────── */
+.dv-workspace {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.dv-workspace-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dv-workspace-pane[hidden] {
+  display: none;
+}
+
+/* SQL editor wrapper (was the implicit container, now explicit). */
+.dv-sql-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Per-SQL-tab database selector (in toolbar, left of Run) ──────────────── */
+.dv-sql-db-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.dv-sql-db-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--dv-bg);
+  border: 1px solid var(--dv-border);
+  color: var(--dv-text);
+  font-family: var(--dv-font-ui);
+  font-size: 12px;
+  padding: 5px 8px 5px 10px;
+  border-radius: var(--dv-radius);
+  cursor: pointer;
+  min-width: 140px;
+  max-width: 220px;
+}
+
+.dv-sql-db-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dv-sql-db-trigger:hover:not(:disabled),
+.dv-sql-db-trigger.is-open {
+  border-color: var(--dv-accent-soft, var(--dv-accent));
+  background: var(--dv-panel-2);
+}
+
+.dv-sql-db-trigger.is-empty .dv-sql-db-trigger-name {
+  color: var(--dv-text-dim);
+  font-style: italic;
+}
+
+.dv-sql-db-trigger-icon {
+  color: var(--dv-accent);
+  font-family: var(--dv-mono);
+  font-size: 12px;
+}
+
+.dv-sql-db-trigger-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dv-sql-db-trigger-caret {
+  color: var(--dv-text-mute);
+  font-size: 10px;
+}
+
+.dv-sql-db-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--dv-panel);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  margin-top: 4px;
+  padding: 4px;
+}
+
+.dv-sql-db-search {
+  padding: 4px 4px 6px;
+}
+
+.dv-sql-db-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--dv-text);
+  border-radius: 4px;
+}
+
+.dv-sql-db-option:hover {
+  background: var(--dv-panel-2);
+}
+
+.dv-sql-db-option.is-active {
+  background: var(--dv-panel-2);
+  color: var(--dv-accent);
+}
+
+.dv-sql-db-option-check {
+  width: 12px;
+  color: var(--dv-accent);
+  font-family: var(--dv-mono);
+  font-size: 11px;
+}
+
+.dv-sql-db-option-tag {
+  font-family: var(--dv-mono);
+  font-size: 10px;
+  color: var(--dv-text-mute);
+  border: 1px solid var(--dv-border);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.dv-sql-db-section-label {
+  padding: 6px 8px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dv-text-mute);
+}
+
+/* ── Workspace tab groups ─────────────────────────────────────────────────── */
+.dv-ws-group-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border-right: 1px solid var(--dv-border);
+  cursor: pointer;
+  color: var(--dv-text);
+  font-family: var(--dv-font-ui);
+  font-size: 12px;
+  background: var(--dv-panel-2);
+  white-space: nowrap;
+  user-select: none;
+  box-shadow: inset 2px 0 0 var(--dv-accent);
+}
+
+.dv-ws-group-head:hover {
+  background: var(--dv-bg);
+}
+
+.dv-ws-group-head.is-collapsed {
+  background: var(--dv-panel);
+  box-shadow: inset 2px 0 0 var(--dv-text-mute);
+}
+
+.dv-ws-group-head:focus-visible {
+  outline: none;
+  box-shadow: inset 2px 0 0 var(--dv-accent), var(--dv-focus-ring);
+}
+
+.dv-ws-group-caret {
+  color: var(--dv-text-mute);
+  font-size: 10px;
+}
+
+.dv-ws-group-name {
+  font-weight: 500;
+}
+
+.dv-ws-group-count {
+  font-family: var(--dv-mono);
+  font-size: 10px;
+  color: var(--dv-text-dim);
+  padding: 1px 6px;
+  border: 1px solid var(--dv-border);
+  border-radius: 999px;
+  background: var(--dv-bg);
+}
+
+/* Slight visual indent for tabs that belong to a group. */
+.dv-ws-tab.is-grouped {
+  box-shadow: inset 2px 0 0 var(--dv-accent-soft, var(--dv-accent));
+}
+
+.dv-ws-tab.is-grouped.is-active {
+  box-shadow:
+    inset 2px 0 0 var(--dv-accent-soft, var(--dv-accent)),
+    inset 0 -2px 0 var(--dv-accent);
+}
+
+/* ── Workspace context menu (right-click on tab / group) ──────────────────── */
+.dv-ws-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 200px;
+  background: var(--dv-panel);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  padding: 4px;
+  font-family: var(--dv-font-ui);
+  font-size: 12px;
+}
+
+.dv-ws-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--dv-text);
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+}
+
+.dv-ws-menu-item:hover {
+  background: var(--dv-panel-2);
+}
+
+.dv-ws-menu-item.is-danger {
+  color: var(--dv-danger);
+}
+
+.dv-ws-menu-label {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dv-text-mute);
+}
+
+.dv-ws-menu-sep {
+  height: 1px;
+  background: var(--dv-border);
+  margin: 4px 0;
 }

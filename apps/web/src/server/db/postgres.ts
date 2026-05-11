@@ -291,10 +291,18 @@ export const postgresDriver: DriverAdapter = {
     });
   },
 
-  async runQuery(c, sql, params) {
-    const start = Date.now();
+  async runQuery(c, sql, options) {
     return withClient(c, async (client) => {
-      const r = await client.query({ text: sql, values: params, rowMode: "array" });
+      if (options?.schema) {
+        // search_path is per-session — safe to set on this short-lived client.
+        await client.query(`SET search_path TO ${ident(options.schema)}, public`);
+      }
+      const start = Date.now();
+      const r = await client.query({
+        text: sql,
+        values: options?.params,
+        rowMode: "array",
+      });
       return shapeResult(r, Date.now() - start);
     });
   },
@@ -309,6 +317,6 @@ export const postgresDriver: DriverAdapter = {
       : "";
     const where = options?.where?.trim() ? `WHERE ${options.where.trim()}` : "";
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT $1 OFFSET $2`;
-    return this.runQuery(c, sql, [limit, offset]);
+    return this.runQuery(c, sql, { params: [limit, offset] });
   },
 };
