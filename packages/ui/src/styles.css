@@ -266,6 +266,45 @@ body {
   display: grid;
   grid-template-columns: var(--dv-sidebar-width) 1fr;
   min-height: 0;
+  position: relative;
+}
+
+/* Handle de redimensionado, montado sobre la columna divisoria del grid. */
+.dv-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--dv-sidebar-width);
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 6;
+  background: transparent;
+  transition: background 120ms ease;
+  touch-action: none;
+}
+
+.dv-sidebar-resizer:hover,
+.dv-sidebar-resizer:focus-visible {
+  background: var(--dv-border-strong);
+  outline: none;
+}
+
+body.is-resizing-sidebar .dv-sidebar-resizer,
+.dv-sidebar-resizer:active {
+  background: var(--dv-accent);
+}
+
+/* Mientras se arrastra, fijamos cursor global y bloqueamos selección de texto
+ * para que el handle no parpadee cuando el mouse sale del 6px de ancho. */
+body.is-resizing-sidebar {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+body.is-resizing-sidebar * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 /* Hacker-only ambience: scanlines + corner vignettes. Pointer-events: none so

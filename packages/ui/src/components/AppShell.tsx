@@ -23,6 +23,7 @@ import { OverviewPane } from "./OverviewPane";
 import { QueryEditor, type SavedFile } from "./QueryEditor";
 import { SchemaDiagramPane } from "./SchemaDiagramPane";
 import { Sidebar } from "./Sidebar";
+import { SidebarResizer } from "./SidebarResizer";
 import { TablePane } from "./TablePane";
 import { Topbar } from "./Topbar";
 import { WorkspaceTabBar } from "./WorkspaceTabBar";
@@ -40,6 +41,12 @@ const TABS_KEY = (id: string) => `dbview.workspaceTabs.${id}`;
 const ACTIVE_KEY = (id: string) => `dbview.workspaceActiveTab.${id}`;
 const FILES_KEY = (id: string) => `dbview.sqlFiles.${id}`;
 const GROUPS_KEY = (id: string) => `dbview.tabGroups.${id}`;
+const SIDEBAR_WIDTH_KEY = "dbview.sidebarWidth";
+// Mínimo: bajo eso la lista de tablas pierde legibilidad. Máximo: más de eso
+// roba demasiado al área de trabajo en pantallas chicas.
+const SIDEBAR_WIDTH_MIN = 180;
+const SIDEBAR_WIDTH_MAX = 520;
+const SIDEBAR_WIDTH_DEFAULT = 264;
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -101,6 +108,36 @@ export function AppShell({ userArea }: Props) {
   const [hydratedFor, setHydratedFor] = useState<string | null>(null);
   const [activeSchema, setActiveSchema] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
+
+  // Hidratar el ancho del sidebar desde localStorage al montar. Se hace en un
+  // efecto (en vez de en el initializer del useState) para no romper SSR.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+      if (!raw) return;
+      const n = Number(raw);
+      if (Number.isFinite(n)) {
+        const clamped = Math.min(
+          SIDEBAR_WIDTH_MAX,
+          Math.max(SIDEBAR_WIDTH_MIN, n),
+        );
+        setSidebarWidth(clamped);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const handleSidebarWidthChange = useCallback((next: number) => {
+    setSidebarWidth(next);
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(next)));
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -658,7 +695,10 @@ export function AppShell({ userArea }: Props) {
         onManageConnections={() => setShowManage(true)}
         rightSlot={userArea}
       />
-      <div className="dv-app-body">
+      <div
+        className="dv-app-body"
+        style={{ ["--dv-sidebar-width" as string]: `${sidebarWidth}px` }}
+      >
         <Sidebar
           connectionId={activeId}
           driver={active?.driver ?? null}
@@ -672,6 +712,13 @@ export function AppShell({ userArea }: Props) {
           onOpenSql={() => openSql()}
           onOpenSchema={openSchemaDiagram}
           onOpenHistory={openHistory}
+        />
+        <SidebarResizer
+          width={sidebarWidth}
+          onChange={handleSidebarWidthChange}
+          defaultWidth={SIDEBAR_WIDTH_DEFAULT}
+          min={SIDEBAR_WIDTH_MIN}
+          max={SIDEBAR_WIDTH_MAX}
         />
         <main className="dv-main">
           {!active && (
