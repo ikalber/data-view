@@ -1,5 +1,12 @@
 # Data View
 
+![Editor SQL con resultados](docs/screenshots/sql-editor.png)
+
+<p align="center">
+  <img src="docs/screenshots/table-view.png" alt="Vista de tabla con grilla editable" width="48%" />
+  <img src="docs/screenshots/schema-diagram.png" alt="Diagrama del schema" width="48%" />
+</p>
+
 Visor de bases de datos al estilo Beekeeper Studio. Un solo monorepo, dos targets:
 
 - **`apps/web`** — Next.js 15 + Auth.js. Pensado para hostear en un dominio. Login multiusuario; cada usuario ve solo sus propias conexiones, con contraseñas cifradas en reposo (AES-256-GCM).
