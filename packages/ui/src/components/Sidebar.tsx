@@ -887,11 +887,7 @@ function renderGlobalTree(p: GlobalTreeProps) {
   function renderFolderGroup(folder: Folder | null, conns: ConnectionConfig[]) {
     if (conns.length === 0) return null;
     const folderKey = folder?.id ?? "__none__";
-    const containsActive =
-      !!activeConnId && conns.some((c) => c.id === activeConnId);
-    // Auto-expand folders containing the active connection regardless of
-    // stored collapsed state — same trick as ConnectionPicker.
-    const collapsed = collapsedFolders.has(folderKey) && !containsActive;
+    const collapsed = collapsedFolders.has(folderKey);
     const label = folder ? folder.name : "Sin carpeta";
     const color = folder?.color ?? "neutral";
 
