@@ -3184,6 +3184,221 @@ input[type="checkbox"]:disabled:checked {
   padding-left: 32px;
 }
 
+/* ── Topbar tree toggle (global connections tree) ──────────────────────── */
+.dv-topbar-tree-toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--dv-border);
+  color: var(--dv-text-mute);
+  border-radius: var(--dv-radius);
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-family: var(--dv-font-ui);
+  font-size: 14px;
+  line-height: 1;
+  transition: color 80ms ease, background 80ms ease, border-color 80ms ease;
+}
+
+.dv-topbar-tree-toggle:hover {
+  color: var(--dv-text);
+  background: var(--dv-panel-2);
+}
+
+.dv-topbar-tree-toggle.is-active {
+  color: var(--dv-text);
+  background: var(--dv-panel-2);
+  border-color: var(--dv-text-mute);
+}
+
+:root[data-theme="hacker"] .dv-topbar-tree-toggle {
+  border-radius: 0;
+  width: 26px;
+  height: 26px;
+  font-size: 12px;
+}
+
+:root[data-theme="hacker"] .dv-topbar-tree-toggle.is-active {
+  color: var(--dv-accent);
+  background: rgba(var(--dv-accent-rgb), 0.08);
+  border-color: rgba(var(--dv-accent-rgb), 0.45);
+  text-shadow: 0 0 6px rgba(var(--dv-accent-rgb), 0.5);
+}
+
+/* ── Connections tree (global cross-connection sidebar view) ──────────── */
+.dv-conn-tree {
+  padding: 4px 4px 8px;
+}
+
+.dv-conn-tree-folder + .dv-conn-tree-folder {
+  margin-top: 2px;
+  border-top: 1px solid var(--dv-border);
+  padding-top: 4px;
+}
+
+.dv-conn-tree-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--dv-text-dim);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: var(--dv-radius);
+  text-align: left;
+}
+
+.dv-conn-tree-folder-head:hover {
+  background: var(--dv-panel-2);
+  color: var(--dv-text);
+}
+
+.dv-conn-tree-folder-name {
+  flex: 1;
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-folder-head {
+  border-radius: 0;
+  font-family: var(--dv-mono);
+  letter-spacing: 0.18em;
+  color: var(--dv-accent-2);
+  padding: 6px 14px;
+}
+
+.dv-conn-tree-folder-children {
+  padding-left: 6px;
+}
+
+.dv-conn-tree-conn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--dv-text);
+  border-radius: var(--dv-radius);
+  margin-bottom: 1px;
+}
+
+.dv-conn-tree-conn-head:hover {
+  background: var(--dv-panel-2);
+}
+
+.dv-conn-tree-conn-head.is-active {
+  background: var(--dv-panel-2);
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-conn-head {
+  border-radius: 0;
+  padding: 6px 14px;
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-conn-head.is-active {
+  background: linear-gradient(90deg, rgba(0, 240, 255, 0.08), transparent);
+  color: var(--dv-accent);
+}
+
+.dv-conn-tree-conn-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.dv-conn-tree-conn-name {
+  font-weight: 500;
+  color: var(--dv-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dv-conn-tree-conn-sub {
+  font-size: 10px;
+  color: var(--dv-text-mute);
+  font-family: var(--dv-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dv-conn-tree-conn-children {
+  padding: 2px 0 4px 14px;
+  border-left: 1px dashed var(--dv-border);
+  margin-left: 16px;
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-conn-children {
+  border-left-color: rgba(var(--dv-accent-rgb), 0.25);
+}
+
+.dv-conn-tree-schema-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--dv-text-dim);
+  border-radius: var(--dv-radius);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dv-conn-tree-schema-head:hover {
+  background: var(--dv-panel-2);
+  color: var(--dv-text);
+}
+
+.dv-conn-tree-schema-head.is-active {
+  background: var(--dv-panel-2);
+  color: var(--dv-text);
+}
+
+.dv-conn-tree-schema-head.is-system {
+  color: var(--dv-text-mute);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-schema-head {
+  border-radius: 0;
+  font-family: var(--dv-mono);
+  letter-spacing: 0.14em;
+}
+
+.dv-conn-tree-schema-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dv-conn-tree-schema-children {
+  padding: 1px 0 4px;
+}
+
+.dv-conn-tree-table {
+  padding-left: 22px;
+}
+
+:root[data-theme="hacker"] .dv-conn-tree-table {
+  padding-left: 26px;
+}
+
 /* ── Tag toggle (used in ConnectionForm) ──────────────────────────────── */
 .dv-tag-cloud {
   display: flex;

@@ -47,6 +47,16 @@ const SIDEBAR_WIDTH_KEY = "dbview.sidebarWidth";
 const SIDEBAR_WIDTH_MIN = 180;
 const SIDEBAR_WIDTH_MAX = 520;
 const SIDEBAR_WIDTH_DEFAULT = 264;
+const GLOBAL_TREE_KEY = "dbview.globalTreeView";
+
+function readInitialGlobalTreeView(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(GLOBAL_TREE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -138,6 +148,21 @@ export function AppShell({ userArea }: Props) {
       /* ignore */
     }
   }, []);
+
+  // Global tree view: ignores the active connection and lets the user navigate
+  // every connection's databases/tables from the sidebar at once.
+  const [globalTreeView, setGlobalTreeView] = useState<boolean>(() =>
+    readInitialGlobalTreeView(),
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(GLOBAL_TREE_KEY, globalTreeView ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [globalTreeView]);
 
   const refresh = useCallback(async () => {
     try {
@@ -471,6 +496,39 @@ export function AppShell({ userArea }: Props) {
     [openTab],
   );
 
+  // When the user clicks a table in the global tree that belongs to a DIFFERENT
+  // connection, we (a) switch the active connection and (b) enqueue the table
+  // open until the new connection's tabs have been hydrated. Otherwise the tab
+  // would be written to localStorage for the *previous* connection.
+  const [pendingOpen, setPendingOpen] = useState<{
+    connId: string;
+    schema: string;
+    name: string;
+  } | null>(null);
+
+  const openTableInConnection = useCallback(
+    (connId: string, schema: string, name: string) => {
+      if (connId === activeId) {
+        openTable(schema, name);
+        return;
+      }
+      setPendingOpen({ connId, schema, name });
+      setActiveId(connId);
+    },
+    [activeId, openTable],
+  );
+
+  // Flush a pending cross-connection open once hydration of the target
+  // connection finishes (so the new tab lands in the right localStorage slot).
+  useEffect(() => {
+    if (!pendingOpen) return;
+    if (hydratedFor !== pendingOpen.connId) return;
+    const { schema, name } = pendingOpen;
+    openTab({ kind: "table", schema, name });
+    setActiveSchema(schema);
+    setPendingOpen(null);
+  }, [pendingOpen, hydratedFor, openTab]);
+
   const openDatabase = useCallback(
     (schema: string) => {
       openTab({ kind: "database-overview", schema });
@@ -693,6 +751,8 @@ export function AppShell({ userArea }: Props) {
           setShowForm(true);
         }}
         onManageConnections={() => setShowManage(true)}
+        globalTreeView={globalTreeView}
+        onToggleGlobalTreeView={() => setGlobalTreeView((v) => !v)}
         rightSlot={userArea}
       />
       <div
@@ -712,6 +772,12 @@ export function AppShell({ userArea }: Props) {
           onOpenSql={() => openSql()}
           onOpenSchema={openSchemaDiagram}
           onOpenHistory={openHistory}
+          globalTreeView={globalTreeView}
+          connections={connections}
+          folders={folders}
+          tags={tags}
+          onSelectConnection={selectConnection}
+          onOpenTableInConnection={openTableInConnection}
         />
         <SidebarResizer
           width={sidebarWidth}
