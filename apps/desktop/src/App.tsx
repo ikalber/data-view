@@ -1,10 +1,12 @@
 import { AppShell, ThemeProvider, TransportProvider } from "@data-view/ui";
 import { tauriTransport } from "./transport/tauri-transport";
+import { ZoomController } from "./zoom/ZoomController";
 
 export function App() {
   return (
     <ThemeProvider>
       <TransportProvider transport={tauriTransport}>
+        <ZoomController />
         <AppShell
           userArea={
             <span
