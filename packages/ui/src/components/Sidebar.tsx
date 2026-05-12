@@ -2,7 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import type { DatabaseDriver, RelationInfo, SchemaInfo } from "@data-view/core";
+import type {
+  ConnectionConfig,
+  DatabaseDriver,
+  Folder,
+  RelationInfo,
+  SchemaInfo,
+  Tag,
+} from "@data-view/core";
 import { useTransport } from "../transport-context";
 import type { WorkspaceTab, WorkspaceTabKind } from "./workspace-tab";
 
@@ -22,6 +29,22 @@ interface Props {
   onOpenSql: () => void;
   onOpenSchema: () => void;
   onOpenHistory: () => void;
+  /** When true, replace the schema/tables UI with a cross-connection tree. */
+  globalTreeView?: boolean;
+  /** All known connections (used by the global tree). */
+  connections?: ConnectionConfig[];
+  /** All known folders (used by the global tree to group connections). */
+  folders?: Folder[];
+  /** All known tags (reserved for future surfacing in the global tree). */
+  tags?: Tag[];
+  /** Switch the active connection from the global tree. */
+  onSelectConnection?: (id: string) => void;
+  /** Open a table in a (potentially different) connection from the global tree. */
+  onOpenTableInConnection?: (
+    connectionId: string,
+    schema: string,
+    name: string,
+  ) => void;
 }
 
 interface NavItem {
@@ -55,6 +78,11 @@ export function Sidebar({
   onOpenSql,
   onOpenSchema,
   onOpenHistory,
+  globalTreeView = false,
+  connections = [],
+  folders = [],
+  onSelectConnection,
+  onOpenTableInConnection,
 }: Props) {
   const transport = useTransport();
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
@@ -72,6 +100,30 @@ export function Sidebar({
   >({});
   const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  // ── Global tree state (caches survive across renders while the toggle is on)
+  const [globalExpandedConns, setGlobalExpandedConns] = useState<Set<string>>(
+    new Set(),
+  );
+  const [globalExpandedSchemas, setGlobalExpandedSchemas] = useState<
+    Set<string>
+  >(new Set()); // key: `${connId}|${schema}`
+  const [globalSchemaCache, setGlobalSchemaCache] = useState<
+    Record<string, SchemaInfo[]>
+  >({});
+  const [globalRelCache, setGlobalRelCache] = useState<
+    Record<string, RelationInfo[]>
+  >({});
+  const [globalLoadingConn, setGlobalLoadingConn] = useState<Set<string>>(
+    new Set(),
+  );
+  const [globalLoadingSchema, setGlobalLoadingSchema] = useState<Set<string>>(
+    new Set(),
+  );
+  const [globalCollapsedFolders, setGlobalCollapsedFolders] = useState<
+    Set<string>
+  >(new Set());
+  const [globalError, setGlobalError] = useState<Record<string, string>>({});
 
   const navItems: NavItem[] = useMemo(
     () => [
@@ -266,6 +318,139 @@ export function Sidebar({
     );
   }
 
+  // ── Global tree: lazy loaders + grouping helpers ─────────────────────────
+  async function loadGlobalSchemas(connId: string) {
+    if (globalSchemaCache[connId]) return;
+    setGlobalLoadingConn((prev) => {
+      const next = new Set(prev);
+      next.add(connId);
+      return next;
+    });
+    setGlobalError((e) => {
+      if (!e[connId]) return e;
+      const { [connId]: _omit, ...rest } = e;
+      return rest;
+    });
+    try {
+      const list = await transport.listSchemas(connId);
+      setGlobalSchemaCache((c) => ({ ...c, [connId]: list }));
+    } catch (e) {
+      setGlobalError((prev) => ({
+        ...prev,
+        [connId]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setGlobalLoadingConn((prev) => {
+        const next = new Set(prev);
+        next.delete(connId);
+        return next;
+      });
+    }
+  }
+
+  async function loadGlobalRelations(connId: string, schema: string) {
+    const key = `${connId}|${schema}`;
+    if (globalRelCache[key]) return;
+    setGlobalLoadingSchema((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    try {
+      const list = await transport.listRelations(connId, schema);
+      setGlobalRelCache((c) => ({ ...c, [key]: list }));
+    } catch (e) {
+      setGlobalError((prev) => ({
+        ...prev,
+        [key]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setGlobalLoadingSchema((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+
+  function toggleGlobalConn(connId: string) {
+    const willOpen = !globalExpandedConns.has(connId);
+    setGlobalExpandedConns((prev) => {
+      const next = new Set(prev);
+      if (next.has(connId)) next.delete(connId);
+      else next.add(connId);
+      return next;
+    });
+    // Activate this connection so the workspace + top-nav follow what the
+    // user is exploring. We do this on every expand click (not only the
+    // first) because it matches the mental model of "I'm browsing this".
+    if (willOpen && onSelectConnection && connId !== connectionId) {
+      onSelectConnection(connId);
+    }
+    if (willOpen) void loadGlobalSchemas(connId);
+  }
+
+  function toggleGlobalSchema(connId: string, schema: string) {
+    const key = `${connId}|${schema}`;
+    const willOpen = !globalExpandedSchemas.has(key);
+    setGlobalExpandedSchemas((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    if (willOpen) void loadGlobalRelations(connId, schema);
+  }
+
+  function toggleGlobalFolder(folderKey: string) {
+    setGlobalCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderKey)) next.delete(folderKey);
+      else next.add(folderKey);
+      return next;
+    });
+  }
+
+  function handleGlobalTableClick(
+    connId: string,
+    schema: string,
+    name: string,
+  ) {
+    if (onOpenTableInConnection) {
+      onOpenTableInConnection(connId, schema, name);
+    } else if (connId === connectionId) {
+      onOpenTable(schema, name);
+    }
+  }
+
+  // Group connections by folder for the global tree. Mirrors ConnectionPicker.
+  const globalGrouped = useMemo(() => {
+    const map = new Map<string | null, ConnectionConfig[]>();
+    map.set(null, []);
+    for (const f of folders) map.set(f.id, []);
+    for (const c of connections) {
+      const key = c.folderId && map.has(c.folderId) ? c.folderId : null;
+      const list = map.get(key) ?? [];
+      list.push(c);
+      map.set(key, list);
+    }
+    return map;
+  }, [connections, folders]);
+
+  // Auto-expand the active connection the first time we enter global mode so
+  // the user lands oriented rather than facing a fully-collapsed tree.
+  useEffect(() => {
+    if (!globalTreeView || !connectionId) return;
+    setGlobalExpandedConns((prev) => {
+      if (prev.has(connectionId)) return prev;
+      const next = new Set(prev);
+      next.add(connectionId);
+      return next;
+    });
+    void loadGlobalSchemas(connectionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalTreeView, connectionId]);
+
   return (
     <aside className="dv-sidebar">
       <nav className="dv-nav-group">
@@ -287,7 +472,7 @@ export function Sidebar({
         ))}
       </nav>
 
-      {connectionId && (
+      {!globalTreeView && connectionId && (
         <div className="dv-schema-picker" ref={pickerRef}>
           <div className="dv-schema-picker-label-row">
             <span className="dv-schema-picker-label">{pickerLabel}</span>
@@ -412,7 +597,28 @@ export function Sidebar({
         </div>
       )}
 
-      {mode === "select" ? (
+      {globalTreeView ? (
+        renderGlobalTree({
+          connections,
+          folders,
+          activeConnId: connectionId,
+          activeSchemaName: activeSchema,
+          activeTab,
+          grouped: globalGrouped,
+          expandedConns: globalExpandedConns,
+          expandedSchemas: globalExpandedSchemas,
+          schemaCache: globalSchemaCache,
+          relCache: globalRelCache,
+          loadingConn: globalLoadingConn,
+          loadingSchemaSet: globalLoadingSchema,
+          collapsedFolders: globalCollapsedFolders,
+          errors: globalError,
+          onToggleFolder: toggleGlobalFolder,
+          onToggleConn: toggleGlobalConn,
+          onToggleSchema: toggleGlobalSchema,
+          onTableClick: handleGlobalTableClick,
+        })
+      ) : mode === "select" ? (
         <div className="dv-tables-section">
           <div className="dv-tables-header">
             <span>Tablas{activeSchema ? ` · ${relations.length}` : ""}</span>
@@ -593,7 +799,9 @@ export function Sidebar({
 
       <div className="dv-sidebar-footer">
         <span>
-          {mode === "tree"
+          {globalTreeView
+            ? `${connections.length} conexiones`
+            : mode === "tree"
             ? `${userSchemas.length} ${pickerLabel.toLowerCase()}s`
             : activeSchema
             ? `${relations.length} tablas`
@@ -609,4 +817,251 @@ function formatCount(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+interface GlobalTreeProps {
+  connections: ConnectionConfig[];
+  folders: Folder[];
+  activeConnId: string | null;
+  activeSchemaName: string | null;
+  activeTab: WorkspaceTab | null;
+  grouped: Map<string | null, ConnectionConfig[]>;
+  expandedConns: Set<string>;
+  expandedSchemas: Set<string>;
+  schemaCache: Record<string, SchemaInfo[]>;
+  relCache: Record<string, RelationInfo[]>;
+  loadingConn: Set<string>;
+  loadingSchemaSet: Set<string>;
+  collapsedFolders: Set<string>;
+  errors: Record<string, string>;
+  onToggleFolder: (key: string) => void;
+  onToggleConn: (id: string) => void;
+  onToggleSchema: (connId: string, schema: string) => void;
+  onTableClick: (connId: string, schema: string, name: string) => void;
+}
+
+function renderGlobalTree(p: GlobalTreeProps) {
+  const {
+    connections,
+    folders,
+    activeConnId,
+    activeSchemaName,
+    activeTab,
+    grouped,
+    expandedConns,
+    expandedSchemas,
+    schemaCache,
+    relCache,
+    loadingConn,
+    loadingSchemaSet,
+    collapsedFolders,
+    errors,
+    onToggleFolder,
+    onToggleConn,
+    onToggleSchema,
+    onTableClick,
+  } = p;
+
+  if (connections.length === 0) {
+    return (
+      <div className="dv-schema-tree">
+        <div className="dv-empty" style={{ padding: 16, fontSize: 12 }}>
+          Sin conexiones todavía.
+        </div>
+      </div>
+    );
+  }
+
+  const orderedFolderIds = folders.map((f) => f.id);
+  const noFolder = grouped.get(null) ?? [];
+
+  function tableIsActive(connId: string, schema: string, name: string) {
+    return (
+      connId === activeConnId &&
+      activeTab?.kind === "table" &&
+      activeTab.schema === schema &&
+      activeTab.name === name
+    );
+  }
+
+  function renderFolderGroup(folder: Folder | null, conns: ConnectionConfig[]) {
+    if (conns.length === 0) return null;
+    const folderKey = folder?.id ?? "__none__";
+    const collapsed = collapsedFolders.has(folderKey);
+    const label = folder ? folder.name : "Sin carpeta";
+    const color = folder?.color ?? "neutral";
+
+    return (
+      <div key={folderKey} className="dv-conn-tree-folder">
+        <button
+          type="button"
+          className="dv-conn-tree-folder-head"
+          onClick={() => onToggleFolder(folderKey)}
+          aria-expanded={!collapsed}
+        >
+          <span className="dv-schema-tree-caret">
+            {collapsed ? "▸" : "▾"}
+          </span>
+          <span className={clsx("dv-tone-dot", `is-${color}`)} aria-hidden />
+          <span className="dv-conn-tree-folder-name">{label}</span>
+          <span className="dv-schema-tree-count">{conns.length}</span>
+        </button>
+        {!collapsed && (
+          <div className="dv-conn-tree-folder-children">
+            {conns.map((c) => renderConnection(c))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderConnection(c: ConnectionConfig) {
+    const isExpanded = expandedConns.has(c.id);
+    const isActive = c.id === activeConnId;
+    const schemas = schemaCache[c.id];
+    const userSchemas = schemas?.filter((s) => !s.isSystem) ?? [];
+    const sysSchemas = schemas?.filter((s) => s.isSystem) ?? [];
+    const loadingSchemas = loadingConn.has(c.id);
+    const err = errors[c.id];
+
+    return (
+      <div key={c.id} className="dv-conn-tree-conn">
+        <div
+          className={clsx(
+            "dv-conn-tree-conn-head",
+            isActive && "is-active",
+          )}
+          onClick={() => onToggleConn(c.id)}
+          role="button"
+          tabIndex={0}
+          title={`${c.driver} · ${c.host}:${c.port}`}
+        >
+          <span className="dv-schema-tree-caret">
+            {isExpanded ? "▾" : "▸"}
+          </span>
+          <span className="dv-conn-tree-conn-body">
+            <span className="dv-conn-tree-conn-name">{c.name}</span>
+            <span className="dv-conn-tree-conn-sub">
+              {c.driver} · {c.host}
+            </span>
+          </span>
+          {isActive && <span className="dv-topbar-status-dot" />}
+        </div>
+        {isExpanded && (
+          <div className="dv-conn-tree-conn-children">
+            {loadingSchemas && !schemas && (
+              <div className="dv-schema-tree-loading">cargando…</div>
+            )}
+            {err && (
+              <div
+                className="dv-error"
+                style={{ margin: "4px 12px", fontSize: 11 }}
+              >
+                {err}
+              </div>
+            )}
+            {!loadingSchemas &&
+              schemas &&
+              schemas.length === 0 &&
+              !err && (
+                <div className="dv-schema-tree-loading">sin databases</div>
+              )}
+            {[...userSchemas, ...sysSchemas].map((s) =>
+              renderSchema(c, s),
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderSchema(c: ConnectionConfig, s: SchemaInfo) {
+    const key = `${c.id}|${s.name}`;
+    const isExpanded = expandedSchemas.has(key);
+    const rels = relCache[key];
+    const loading = loadingSchemaSet.has(key) && !rels;
+    const isActiveSchema =
+      c.id === activeConnId && s.name === activeSchemaName;
+    const err = errors[key];
+
+    return (
+      <div key={key} className="dv-conn-tree-schema">
+        <div
+          className={clsx(
+            "dv-conn-tree-schema-head",
+            isActiveSchema && "is-active",
+            s.isSystem && "is-system",
+          )}
+          onClick={() => onToggleSchema(c.id, s.name)}
+        >
+          <span className="dv-schema-tree-caret">
+            {isExpanded ? "▾" : "▸"}
+          </span>
+          <span className="dv-conn-tree-schema-name">{s.name}</span>
+          {rels && (
+            <span className="dv-schema-tree-count">{rels.length}</span>
+          )}
+        </div>
+        {isExpanded && (
+          <div className="dv-conn-tree-schema-children">
+            {loading && (
+              <div className="dv-schema-tree-loading">cargando…</div>
+            )}
+            {err && (
+              <div
+                className="dv-error"
+                style={{ margin: "4px 12px", fontSize: 11 }}
+              >
+                {err}
+              </div>
+            )}
+            {!loading && rels && rels.length === 0 && !err && (
+              <div className="dv-schema-tree-loading">sin tablas</div>
+            )}
+            {(rels ?? []).map((r) => {
+              const active = tableIsActive(c.id, r.schema, r.name);
+              return (
+                <div
+                  key={`${r.schema}.${r.name}`}
+                  className={clsx(
+                    "dv-table-row",
+                    "dv-conn-tree-table",
+                    active && "is-active",
+                  )}
+                  onClick={() => onTableClick(c.id, r.schema, r.name)}
+                  title={`${c.name} · ${r.schema}.${r.name}`}
+                >
+                  <span className="dv-table-row-icon">
+                    {r.kind === "view"
+                      ? "◇"
+                      : r.kind === "materialized_view"
+                      ? "◈"
+                      : "▦"}
+                  </span>
+                  <span className="dv-table-row-name">{r.name}</span>
+                  {r.approxRowCount != null && (
+                    <span className="dv-table-row-count">
+                      {formatCount(r.approxRowCount)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="dv-schema-tree dv-conn-tree">
+      {orderedFolderIds.map((fid) => {
+        const folder = folders.find((f) => f.id === fid);
+        if (!folder) return null;
+        const list = grouped.get(fid) ?? [];
+        return renderFolderGroup(folder, list);
+      })}
+      {noFolder.length > 0 && renderFolderGroup(null, noFolder)}
+    </div>
+  );
 }

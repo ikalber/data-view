@@ -1,7 +1,9 @@
 "use client";
 
 import type { ReactNode } from "react";
+import clsx from "clsx";
 import type { ConnectionConfig, Folder, Tag } from "@data-view/core";
+import { BrandLogo } from "./BrandLogo";
 import { ConnectionPicker } from "./ConnectionPicker";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
@@ -13,6 +15,10 @@ interface Props {
   onSelectConnection: (id: string) => void;
   onAddConnection: () => void;
   onManageConnections: () => void;
+  /** Whether the sidebar is showing the cross-connection tree view. */
+  globalTreeView?: boolean;
+  /** Toggle the cross-connection tree view in the sidebar. */
+  onToggleGlobalTreeView?: () => void;
   /** Right-side slot for app-specific chrome (user menu, sign out, etc). */
   rightSlot?: ReactNode;
 }
@@ -25,12 +31,14 @@ export function Topbar({
   onSelectConnection,
   onAddConnection,
   onManageConnections,
+  globalTreeView = false,
+  onToggleGlobalTreeView,
   rightSlot,
 }: Props) {
   return (
     <header className="dv-topbar">
       <div className="dv-brand">
-        <span className="dv-brand-mark" aria-hidden />
+        <BrandLogo className="dv-brand-mark" aria-hidden />
         <span>Data View</span>
       </div>
       <span className="dv-topbar-divider" aria-hidden />
@@ -44,6 +52,22 @@ export function Topbar({
         onAdd={onAddConnection}
         onManage={onManageConnections}
       />
+
+      {onToggleGlobalTreeView && (
+        <button
+          type="button"
+          className={clsx(
+            "dv-topbar-tree-toggle",
+            globalTreeView && "is-active",
+          )}
+          title="Modo árbol — explorar todas las conexiones desde el sidebar"
+          aria-label="Alternar modo árbol global"
+          aria-pressed={globalTreeView}
+          onClick={onToggleGlobalTreeView}
+        >
+          <span aria-hidden>⊟</span>
+        </button>
+      )}
 
       <div className="dv-topbar-spacer" />
 
