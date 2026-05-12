@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import type { ConnectionConfig, Folder, Tag } from "@data-view/core";
+import { BrandLogo } from "./BrandLogo";
 import { ConnectionPicker } from "./ConnectionPicker";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
@@ -30,7 +31,7 @@ export function Topbar({
   return (
     <header className="dv-topbar">
       <div className="dv-brand">
-        <span className="dv-brand-mark" aria-hidden />
+        <BrandLogo className="dv-brand-mark" aria-hidden />
         <span>Data View</span>
       </div>
       <span className="dv-topbar-divider" aria-hidden />
