@@ -1,5 +1,7 @@
 # Data View
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ![Editor SQL con resultados](docs/screenshots/sql-editor.png)
 
 <p align="center">
