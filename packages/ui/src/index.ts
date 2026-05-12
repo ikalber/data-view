@@ -12,6 +12,7 @@ export {
 } from "./theme-context";
 export { AppShell } from "./components/AppShell";
 export { Topbar } from "./components/Topbar";
+export { BrandLogo } from "./components/BrandLogo";
 export { ThemeSwitcher } from "./components/ThemeSwitcher";
 export { ConnectionPicker } from "./components/ConnectionPicker";
 export { ConnectionList } from "./components/ConnectionList";

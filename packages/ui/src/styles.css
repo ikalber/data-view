@@ -343,31 +343,12 @@ body {
 .dv-brand-mark {
   width: 24px;
   height: 24px;
-  border: 1px solid currentColor;
-  position: relative;
-  display: inline-block;
   flex-shrink: 0;
-}
-
-.dv-brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 4px;
-  border: 1px solid currentColor;
-  border-radius: 50%;
+  display: inline-block;
 }
 
 :root[data-theme="hacker"] .dv-brand-mark {
-  width: 14px;
-  height: 14px;
-  background: var(--dv-accent);
-  box-shadow: 0 0 10px var(--dv-accent);
-}
-
-:root[data-theme="hacker"] .dv-brand-mark::after {
-  inset: 3px;
-  border-color: var(--dv-bg);
-  border-radius: 0;
+  filter: drop-shadow(0 0 6px rgba(var(--dv-accent-rgb), 0.55));
 }
 
 .dv-topbar-divider {
