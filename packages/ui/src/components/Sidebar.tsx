@@ -807,7 +807,7 @@ export function Sidebar({
             ? `${relations.length} tablas`
             : `${userSchemas.length} ${pickerLabel.toLowerCase()}s`}
         </span>
-        <span>v0.1</span>
+        <span>v0.1.8</span>
       </div>
     </aside>
   );

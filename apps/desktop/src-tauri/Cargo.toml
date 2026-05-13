@@ -1,6 +1,6 @@
 [package]
 name = "data-view-desktop"
-version = "0.1.0"
+version = "0.1.8"
 description = "Data View — visor de bases de datos"
 authors = ["Data View"]
 edition = "2021"
