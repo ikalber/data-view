@@ -55,7 +55,7 @@ function LoginInner() {
         </p>
 
         <div className="dv-login-foot">
-          <span>v0.1.8</span>
+          <span>v0.1.9</span>
           <span style={{ width: 1, height: 10, background: "var(--dv-border)" }} />
           <span>postgres · mysql · sqlserver</span>
         </div>
