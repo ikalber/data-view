@@ -14,11 +14,24 @@ import { useTransport } from "../transport-context";
 interface Props {
   onClose: () => void;
   onChanged: () => void | Promise<void>;
+  onEditConnection?: (id: string) => void;
+  /** Bump to force a refresh from the parent (e.g. after editing a connection
+   * from outside the modal). */
+  refreshToken?: number;
+  /** Suspender el handler de Escape mientras hay otro modal apilado encima
+   * (sino se cerrarían los dos a la vez). */
+  escapeEnabled?: boolean;
 }
 
 type Pane = "folders" | "tags";
 
-export function ManageConnectionsModal({ onClose, onChanged }: Props) {
+export function ManageConnectionsModal({
+  onClose,
+  onChanged,
+  onEditConnection,
+  refreshToken,
+  escapeEnabled = true,
+}: Props) {
   const transport = useTransport();
   const [pane, setPane] = useState<Pane>("folders");
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
@@ -59,16 +72,17 @@ export function ManageConnectionsModal({ onClose, onChanged }: Props) {
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshToken]);
 
   // Close on Escape.
   useEffect(() => {
+    if (!escapeEnabled) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, escapeEnabled]);
 
   const tagsById = useMemo(() => new Map(tags.map((t) => [t.id, t])), [tags]);
 
@@ -397,6 +411,7 @@ export function ManageConnectionsModal({ onClose, onChanged }: Props) {
                       tagsById={tagsById}
                       onMove={(folderId) => handleMoveConnection(c, folderId)}
                       onToggleTag={(tagId) => handleToggleTag(c, tagId)}
+                      onEdit={onEditConnection ? () => onEditConnection(c.id) : undefined}
                       disabled={busy}
                     />
                   ))}
@@ -463,6 +478,7 @@ export function ManageConnectionsModal({ onClose, onChanged }: Props) {
                       tagsById={tagsById}
                       onMove={(folderId) => handleMoveConnection(c, folderId)}
                       onToggleTag={(tagId) => handleToggleTag(c, tagId)}
+                      onEdit={onEditConnection ? () => onEditConnection(c.id) : undefined}
                       disabled={busy}
                     />
                   ))}
@@ -661,6 +677,7 @@ interface ConnectionRowProps {
   disabled: boolean;
   onMove: (folderId: string | null) => void;
   onToggleTag: (tagId: string) => void;
+  onEdit?: () => void;
 }
 
 function ConnectionRow({
@@ -671,12 +688,28 @@ function ConnectionRow({
   disabled,
   onMove,
   onToggleTag,
+  onEdit,
 }: ConnectionRowProps) {
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   return (
     <div className="dv-manage-conn-row">
       <div className="dv-manage-conn-info">
-        <div className="dv-manage-conn-name">{connection.name}</div>
+        <div className="dv-manage-conn-name">
+          {connection.name}
+          {onEdit && (
+            <button
+              type="button"
+              className="dv-icon-button"
+              title="Editar conexión"
+              aria-label="Editar conexión"
+              onClick={onEdit}
+              disabled={disabled}
+              style={{ marginLeft: 6 }}
+            >
+              ✎
+            </button>
+          )}
+        </div>
         <div className="dv-manage-conn-meta">
           {connection.driver} · {connection.host}:{connection.port}/{connection.database}
         </div>

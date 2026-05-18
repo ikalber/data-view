@@ -106,13 +106,6 @@ export function ConnectionPicker({
         )}
         <span className="dv-conn-pill-caret">▾</span>
       </button>
-      <span
-        className="dv-kbd"
-        style={{ marginLeft: 8, alignSelf: "center" }}
-        title="Atajo para abrir el switcher"
-      >
-        ⌘\
-      </span>
 
       {open && (
         <div className="dv-popover dv-popover-grouped" role="listbox">

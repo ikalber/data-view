@@ -35,6 +35,12 @@ import {
 interface Props {
   /** Right-side slot in the topbar (user menu, sign-out link, etc). */
   userArea?: ReactNode;
+  /**
+   * Si está activo, Ctrl/Cmd+W cierra la pestaña activa.
+   * Solo tiene sentido en desktop: en el navegador, ese atajo cierra la
+   * pestaña del browser y no puede interceptarse de forma confiable.
+   */
+  enableCloseTabShortcut?: boolean;
 }
 
 const TABS_KEY = (id: string) => `dbview.workspaceTabs.${id}`;
@@ -95,7 +101,7 @@ function untitledSqlName(tabs: WorkspaceTab[]): string {
   return `Sin título ${n}`;
 }
 
-export function AppShell({ userArea }: Props) {
+export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   const transport = useTransport();
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -103,6 +109,7 @@ export function AppShell({ userArea }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [showManage, setShowManage] = useState(false);
+  const [manageRefreshToken, setManageRefreshToken] = useState(0);
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(
     null,
   );
@@ -339,6 +346,22 @@ export function AppShell({ userArea }: Props) {
     },
     [activeTabId, files, tabs],
   );
+
+  // Ctrl/Cmd+W para cerrar la pestaña activa (solo desktop). En navegador no
+  // se habilita porque el atajo lo captura el browser antes que el webview.
+  useEffect(() => {
+    if (!enableCloseTabShortcut) return;
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.altKey || e.shiftKey) return;
+      if (e.key !== "w" && e.key !== "W") return;
+      if (!activeTabId) return;
+      e.preventDefault();
+      closeTab(activeTabId);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [enableCloseTabShortcut, activeTabId, closeTab]);
 
   // ── Tab groups ─────────────────────────────────────────────────────────────
 
@@ -834,6 +857,20 @@ export function AppShell({ userArea }: Props) {
           )}
         </main>
       </div>
+      {showManage && (
+        <ManageConnectionsModal
+          onClose={() => setShowManage(false)}
+          onChanged={refresh}
+          onEditConnection={(id) => {
+            setEditingConnectionId(id);
+            setShowForm(true);
+          }}
+          refreshToken={manageRefreshToken}
+          escapeEnabled={!showForm}
+        />
+      )}
+      {/* Rendered after the manage modal so when both are open the form
+          stacks visually on top. */}
       {showForm && (
         <ConnectionForm
           folders={folders}
@@ -849,17 +886,20 @@ export function AppShell({ userArea }: Props) {
             setEditingConnectionId(null);
           }}
           onSaved={async (id) => {
+            const wasEditingFromManage = showManage && editingConnectionId !== null;
             setShowForm(false);
             setEditingConnectionId(null);
             await refresh();
-            setActiveId(id);
+            // Only switch to the saved connection when creating a brand-new
+            // one. If the user was editing from "Gestionar conexiones", they
+            // should stay where they were — and the manage modal needs to
+            // refresh its local copy of the connection.
+            if (wasEditingFromManage) {
+              setManageRefreshToken((n) => n + 1);
+            } else {
+              setActiveId(id);
+            }
           }}
-        />
-      )}
-      {showManage && (
-        <ManageConnectionsModal
-          onClose={() => setShowManage(false)}
-          onChanged={refresh}
         />
       )}
     </div>

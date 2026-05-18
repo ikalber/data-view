@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 import {
   defaultPort,
@@ -51,6 +51,14 @@ export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Pr
     setForm((f) => ({ ...f, [key]: value }));
     setTest(null);
   }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
 
   function toggleTag(id: string) {
     setForm((f) => {

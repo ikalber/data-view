@@ -8,6 +8,7 @@ export function App() {
       <TransportProvider transport={tauriTransport}>
         <ZoomController />
         <AppShell
+          enableCloseTabShortcut
           userArea={
             <span
               style={{

@@ -44,8 +44,14 @@ function applyZoom(factor: number) {
   // La propiedad `zoom` está soportada en Chromium/WebKit (el webview de Tauri en
   // todas las plataformas relevantes) y reflowea el layout, a diferencia de
   // `transform: scale` que mantiene el tamaño original del box.
-  (document.documentElement.style as CSSStyleDeclaration & { zoom?: string }).zoom =
-    String(factor);
+  const style = document.documentElement.style as CSSStyleDeclaration & {
+    zoom?: string;
+  };
+  style.zoom = String(factor);
+  // Las unidades vh/vw se calculan sobre el viewport real e ignoran `zoom`.
+  // Exponemos el factor para que .dv-app pueda compensarlo (height: 100vh / zoom)
+  // y así el shell siempre encaje exactamente con el viewport visible.
+  style.setProperty("--dv-zoom", String(factor));
 }
 
 function indexOfLevel(factor: number): number {

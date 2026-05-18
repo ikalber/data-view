@@ -254,7 +254,12 @@ body {
   display: grid;
   grid-template-rows: var(--dv-topbar-height) 1fr;
   grid-template-columns: 1fr;
-  height: 100vh;
+  /* `vh`/`vw` no se ven afectados por el `zoom` aplicado al <html>, así que
+   * dividimos por --dv-zoom (seteado por el desktop) para que el shell, una vez
+   * escalado, encaje exactamente con el viewport. Sin esto, zoom > 1 produce
+   * scroll vertical y zoom < 1 deja el sidebar corto. */
+  height: calc(100vh / var(--dv-zoom, 1));
+  width: calc(100vw / var(--dv-zoom, 1));
   background: var(--dv-bg);
   color: var(--dv-text);
   font-family: var(--dv-font-ui);
