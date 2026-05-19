@@ -1,6 +1,6 @@
 {
   "name": "@data-view/desktop",
-  "version": "0.1.9",
+  "version": "1.0.1",
   "private": true,
   "license": "MIT",
   "type": "module",

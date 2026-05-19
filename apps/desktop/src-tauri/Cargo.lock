@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "data-view-desktop"
-version = "0.1.9"
+version = "1.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
