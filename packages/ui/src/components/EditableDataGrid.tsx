@@ -197,11 +197,104 @@ export function EditableDataGrid({
     setEditing({ kind: "new", tempId, col });
   }
 
+  type NavTarget =
+    | { kind: "edit"; pkKey: string; col: string; display: string }
+    | { kind: "new"; tempId: string; col: string; display: string };
+
+  /** Find the next editable cell from (fromKind, fromIdx, colName) walking by
+   * (dr, dc). Skips read-only cells (PKs on existing rows) and rows without a
+   * PK. Returns null when the edge is reached. */
+  function getNavTarget(
+    fromKind: "existing" | "new",
+    fromIdx: number,
+    colName: string,
+    dr: number,
+    dc: number,
+  ): NavTarget | null {
+    if (!result) return null;
+    const colIdx = result.columns.findIndex((c) => c.name === colName);
+    if (colIdx === -1) return null;
+
+    const existingCount = result.rows.length;
+    const newCount = newRows?.length ?? 0;
+    const totalRows = existingCount + newCount;
+
+    let curGlobal =
+      fromKind === "existing" ? fromIdx : existingCount + fromIdx;
+    let curCol = colIdx;
+
+    while (true) {
+      curGlobal += dr;
+      curCol += dc;
+      if (curGlobal < 0 || curGlobal >= totalRows) return null;
+      if (curCol < 0 || curCol >= result.columns.length) return null;
+
+      const targetColName = result.columns[curCol]!.name;
+      const colInfo = columnsInfo.get(targetColName);
+
+      if (curGlobal < existingCount) {
+        const targetRow = result.rows[curGlobal]!;
+        const pkKey = rowPkKey(targetRow, colNameToIdx, pkColumns);
+        if (!pkKey || isReadOnly(colInfo)) continue;
+        const editedVal = edits.get(pkKey)?.changes?.[targetColName];
+        const original = cellToString(
+          targetRow[colNameToIdx.get(targetColName) ?? -1],
+        );
+        return {
+          kind: "edit",
+          pkKey,
+          col: targetColName,
+          display: editedVal ?? original,
+        };
+      } else {
+        const nrIdx = curGlobal - existingCount;
+        const nr = newRows![nrIdx]!;
+        const cellVal = nr.values[targetColName];
+        return {
+          kind: "new",
+          tempId: nr.tempId,
+          col: targetColName,
+          display: cellVal ?? "",
+        };
+      }
+    }
+  }
+
+  /** Map a Ctrl+Arrow keydown to a (dr, dc) direction; null otherwise. */
+  function ctrlArrowDir(
+    e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
+  ): { dr: number; dc: number } | null {
+    if (!e.ctrlKey && !e.metaKey) return null;
+    switch (e.key) {
+      case "ArrowRight":
+        return { dr: 0, dc: 1 };
+      case "ArrowLeft":
+        return { dr: 0, dc: -1 };
+      case "ArrowDown":
+        return { dr: 1, dc: 0 };
+      case "ArrowUp":
+        return { dr: -1, dc: 0 };
+      default:
+        return null;
+    }
+  }
+
+  function jumpToTarget(target: NavTarget | null) {
+    if (target?.kind === "edit") {
+      startEdit(target.pkKey, target.col, target.display);
+    } else if (target?.kind === "new") {
+      startEditNew(target.tempId, target.col, target.display);
+    } else {
+      setEditing(null);
+    }
+  }
+
   function onKeyDownExisting(
     e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
     pkKey: string,
     col: string,
     original: string,
+    rowIdx: number,
   ) {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -214,6 +307,20 @@ export function EditableDataGrid({
       // jump focus to neighbour cells (skip for now) but at least the value
       // is preserved.
       commitExisting(pkKey, col, original, draft);
+    } else {
+      const dir = ctrlArrowDir(e);
+      if (dir) {
+        e.preventDefault();
+        const target = getNavTarget("existing", rowIdx, col, dir.dr, dir.dc);
+        // Commit the current cell into the edits buffer without leaving edit
+        // mode — jumpToTarget will set the next editing cell (or clear it).
+        if (draft === original) {
+          onChangeCell(pkKey, col, null);
+        } else {
+          onChangeCell(pkKey, col, draft);
+        }
+        jumpToTarget(target);
+      }
     }
   }
 
@@ -221,6 +328,7 @@ export function EditableDataGrid({
     e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
     tempId: string,
     col: string,
+    nrIdx: number,
   ) {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -230,6 +338,14 @@ export function EditableDataGrid({
       cancel();
     } else if (e.key === "Tab") {
       commitNew(tempId, col, draft);
+    } else {
+      const dir = ctrlArrowDir(e);
+      if (dir) {
+        e.preventDefault();
+        const target = getNavTarget("new", nrIdx, col, dir.dr, dir.dc);
+        onChangeNewRowCell?.(tempId, col, draft);
+        jumpToTarget(target);
+      }
     }
   }
 
@@ -346,7 +462,8 @@ export function EditableDataGrid({
                         colInfo,
                         draft,
                         setDraft,
-                        (e) => onKeyDownExisting(e, pkKey, c.name, original),
+                        (e) =>
+                          onKeyDownExisting(e, pkKey, c.name, original, rowIdx),
                         () => commitExisting(pkKey, c.name, original, draft),
                         inputRef,
                       )
@@ -433,7 +550,7 @@ export function EditableDataGrid({
                         colInfo,
                         draft,
                         setDraft,
-                        (e) => onKeyDownNew(e, nr.tempId, c.name),
+                        (e) => onKeyDownNew(e, nr.tempId, c.name, nrIdx),
                         () => commitNew(nr.tempId, c.name, draft),
                         inputRef,
                         (e) => onPasteNewCell(e, nr.tempId, c.name),
