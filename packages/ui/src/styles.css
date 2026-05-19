@@ -2603,6 +2603,50 @@ input[type="checkbox"]:disabled:checked {
   color: var(--dv-tone-danger-fg);
 }
 
+/* Rows staged for INSERT (before "Guardar cambios" is clicked). */
+.dv-table tr.is-new-row td {
+  background: var(--dv-tone-info-bg);
+  border-top: 1px dashed var(--dv-tone-info-bd);
+}
+
+.dv-table tr.is-new-row td.is-row-error {
+  background: var(--dv-tone-danger-bg);
+  color: var(--dv-tone-danger-fg);
+}
+
+.dv-table td.is-new-cell {
+  font-style: italic;
+}
+
+.dv-table td.is-new-cell.is-new-touched {
+  font-style: normal;
+  color: var(--dv-tone-info-fg);
+  font-weight: 500;
+}
+
+.dv-table td.is-new-row-marker {
+  background: var(--dv-tone-info-bg);
+  color: var(--dv-tone-info-fg);
+  padding: 0;
+}
+
+.dv-new-row-remove {
+  background: transparent;
+  border: none;
+  color: var(--dv-tone-info-fg);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  width: 100%;
+  height: 100%;
+}
+
+.dv-new-row-remove:hover {
+  background: var(--dv-tone-danger-bg);
+  color: var(--dv-tone-danger-fg);
+}
+
 /* Editing input/select inside a cell */
 .dv-cell-input,
 .dv-cell-select {
@@ -4552,6 +4596,16 @@ input[type="checkbox"]:disabled:checked {
   color: var(--dv-text);
   background: var(--dv-bg);
   box-shadow: inset 0 -2px 0 var(--dv-accent);
+}
+
+/* Preview tab (VS Code-style): single-click in the sidebar opens here; the
+ * tab is replaced by the next preview open. Italic title signals impermanence.
+ * Double-click the tab (or edit its content) to pin. */
+.dv-ws-tab.is-preview .dv-ws-tab-title {
+  font-style: italic;
+}
+.dv-ws-tab.is-preview.is-active {
+  box-shadow: inset 0 -2px 0 var(--dv-text-mute);
 }
 
 .dv-ws-tab:focus-visible {

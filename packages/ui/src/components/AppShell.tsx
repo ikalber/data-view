@@ -285,23 +285,71 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     [active?.database],
   );
 
-  /** Open a tab, focusing the existing one when its identity matches. */
+  /** Open a tab, focusing the existing one when its identity matches.
+   *
+   * Preview semantics (VS Code-style):
+   * - `opts.preview = true`: open as a preview tab. If a preview tab already
+   *   exists, REPLACE it in place (same slot/group), so single-clicking
+   *   different items in the sidebar swaps the preview without piling up tabs.
+   * - `opts.preview = false` (default): open as a regular pinned tab.
+   *
+   * If the requested item already has an existing tab (non-sql identity), we
+   * just focus it. We additionally pin the existing tab when the caller asked
+   * for a pinned open — e.g., double-clicking a sidebar item already in
+   * preview should keep it open. */
   const openTab = useCallback(
-    (tab: DistributiveOmit<WorkspaceTab, "id">) => {
-      const newTab = { ...tab, id: uid() } as WorkspaceTab;
+    (
+      tab: DistributiveOmit<WorkspaceTab, "id">,
+      opts?: { preview?: boolean },
+    ) => {
+      const preview = opts?.preview ?? false;
+      const newTab = {
+        ...tab,
+        id: uid(),
+        isPreview: preview,
+      } as WorkspaceTab;
       const key = tabIdentityKey(newTab);
       if (newTab.kind !== "sql") {
         const existing = tabs.find((t) => tabIdentityKey(t) === key);
         if (existing) {
           setActiveTabId(existing.id);
+          if (!preview && existing.isPreview) {
+            setTabs((prev) =>
+              prev.map((t) =>
+                t.id === existing.id ? { ...t, isPreview: false } : t,
+              ),
+            );
+          }
           return;
         }
       }
-      setTabs((prev) => [...prev, newTab]);
+      if (preview) {
+        setTabs((prev) => {
+          const previewIdx = prev.findIndex((t) => t.isPreview);
+          if (previewIdx < 0) return [...prev, newTab];
+          // Inherit the slot's groupId so the swap stays inside the same group.
+          const replaced = prev[previewIdx]!;
+          const next = [...prev];
+          next[previewIdx] = { ...newTab, groupId: replaced.groupId ?? null };
+          return next;
+        });
+      } else {
+        setTabs((prev) => [...prev, newTab]);
+      }
       setActiveTabId(newTab.id);
     },
     [tabs],
   );
+
+  /** Pin a tab (clears its preview flag). Called when the user signals intent
+   * to keep the tab around — edits, double-click on the tab, drag, etc. */
+  const pinTab = useCallback((id: string) => {
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === id && t.isPreview ? { ...t, isPreview: false } : t,
+      ),
+    );
+  }, []);
 
   const closeTab = useCallback(
     (id: string) => {
@@ -386,7 +434,9 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     (tabId: string, groupId: string) => {
       setTabs((prev) => {
         const updated = prev.map((t) =>
-          t.id === tabId ? { ...t, groupId } : t,
+          // Pin while assigning — grouping a tab is an explicit "keep this
+          // around" gesture, so it shouldn't stay swappable as a preview.
+          t.id === tabId ? { ...t, groupId, isPreview: false } : t,
         );
         // Place this tab adjacent to its group's other members.
         const groupTabIds = new Set(
@@ -409,7 +459,11 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   const createGroupFromTab = useCallback((tabId: string, name: string) => {
     const id = uid();
     setGroups((gs) => [...gs, { id, name, collapsed: false }]);
-    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, groupId: id } : t)));
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId ? { ...t, groupId: id, isPreview: false } : t,
+      ),
+    );
   }, []);
 
   const removeTabFromGroup = useCallback((tabId: string) => {
@@ -512,8 +566,8 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   );
 
   const openTable = useCallback(
-    (schema: string, name: string) => {
-      openTab({ kind: "table", schema, name });
+    (schema: string, name: string, opts?: { preview?: boolean }) => {
+      openTab({ kind: "table", schema, name }, opts);
       setActiveSchema(schema);
     },
     [openTab],
@@ -524,38 +578,60 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   // until the new connection's tabs have been hydrated. Otherwise the tab
   // would be written to localStorage for the *previous* connection.
   const [pendingOpen, setPendingOpen] = useState<
-    | { kind: "table"; connId: string; schema: string; name: string }
-    | { kind: "database"; connId: string; schema: string }
+    | {
+        kind: "table";
+        connId: string;
+        schema: string;
+        name: string;
+        preview: boolean;
+      }
+    | { kind: "database"; connId: string; schema: string; preview: boolean }
     | null
   >(null);
 
   const openTableInConnection = useCallback(
-    (connId: string, schema: string, name: string) => {
+    (
+      connId: string,
+      schema: string,
+      name: string,
+      opts?: { preview?: boolean },
+    ) => {
       if (connId === activeId) {
-        openTable(schema, name);
+        openTable(schema, name, opts);
         return;
       }
-      setPendingOpen({ kind: "table", connId, schema, name });
+      setPendingOpen({
+        kind: "table",
+        connId,
+        schema,
+        name,
+        preview: opts?.preview ?? false,
+      });
       setActiveId(connId);
     },
     [activeId, openTable],
   );
 
   const openDatabase = useCallback(
-    (schema: string) => {
-      openTab({ kind: "database-overview", schema });
+    (schema: string, opts?: { preview?: boolean }) => {
+      openTab({ kind: "database-overview", schema }, opts);
       setActiveSchema(schema);
     },
     [openTab],
   );
 
   const openDatabaseInConnection = useCallback(
-    (connId: string, schema: string) => {
+    (connId: string, schema: string, opts?: { preview?: boolean }) => {
       if (connId === activeId) {
-        openDatabase(schema);
+        openDatabase(schema, opts);
         return;
       }
-      setPendingOpen({ kind: "database", connId, schema });
+      setPendingOpen({
+        kind: "database",
+        connId,
+        schema,
+        preview: opts?.preview ?? false,
+      });
       setActiveId(connId);
     },
     [activeId, openDatabase],
@@ -567,32 +643,48 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     if (!pendingOpen) return;
     if (hydratedFor !== pendingOpen.connId) return;
     if (pendingOpen.kind === "table") {
-      const { schema, name } = pendingOpen;
-      openTab({ kind: "table", schema, name });
+      const { schema, name, preview } = pendingOpen;
+      openTab({ kind: "table", schema, name }, { preview });
       setActiveSchema(schema);
     } else {
-      const { schema } = pendingOpen;
-      openTab({ kind: "database-overview", schema });
+      const { schema, preview } = pendingOpen;
+      openTab({ kind: "database-overview", schema }, { preview });
       setActiveSchema(schema);
     }
     setPendingOpen(null);
   }, [pendingOpen, hydratedFor, openTab]);
 
-  const openConnectionOverview = useCallback(() => {
-    openTab({ kind: "connection-overview" });
-  }, [openTab]);
+  const openConnectionOverview = useCallback(
+    (opts?: { preview?: boolean }) => {
+      openTab({ kind: "connection-overview" }, opts);
+    },
+    [openTab],
+  );
 
-  const openSchemaDiagram = useCallback(() => {
-    openTab({ kind: "schema", schema: activeSchema });
-  }, [openTab, activeSchema]);
+  const openSchemaDiagram = useCallback(
+    (opts?: { preview?: boolean }) => {
+      openTab({ kind: "schema", schema: activeSchema }, opts);
+    },
+    [openTab, activeSchema],
+  );
 
-  const openHistory = useCallback(() => {
-    openTab({ kind: "history" });
-  }, [openTab]);
+  const openHistory = useCallback(
+    (opts?: { preview?: boolean }) => {
+      openTab({ kind: "history" }, opts);
+    },
+    [openTab],
+  );
 
   const updateTabSql = useCallback((id: string, sql: string) => {
     setTabs((prev) =>
-      prev.map((t) => (t.id === id && t.kind === "sql" ? { ...t, sql } : t)),
+      prev.map((t) =>
+        t.id === id && t.kind === "sql"
+          ? // Typing/editing is the canonical "interaction" that pins a
+            // preview tab — once you put work into it, we don't want a stray
+            // sidebar click to swap it out from under you.
+            { ...t, sql, isPreview: false }
+          : t,
+      ),
     );
   }, []);
 
@@ -650,26 +742,44 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   );
 
   const openSqlFile = useCallback(
-    (file: SavedFile) => {
+    (file: SavedFile, opts?: { preview?: boolean }) => {
+      const preview = opts?.preview ?? false;
       const existing = tabs.find(
         (t) => t.kind === "sql" && t.fileId === file.id,
       );
       if (existing) {
         setActiveTabId(existing.id);
+        if (!preview && existing.isPreview) {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === existing.id ? { ...t, isPreview: false } : t,
+            ),
+          );
+        }
         return;
       }
       const newId = uid();
-      setTabs((prev) => [
-        ...prev,
-        {
-          id: newId,
-          kind: "sql",
-          title: file.name,
-          sql: file.sql,
-          fileId: file.id,
-          database: activeSchema,
-        },
-      ]);
+      const fileTab: WorkspaceTab = {
+        id: newId,
+        kind: "sql",
+        title: file.name,
+        sql: file.sql,
+        fileId: file.id,
+        database: activeSchema,
+        isPreview: preview,
+      };
+      if (preview) {
+        setTabs((prev) => {
+          const previewIdx = prev.findIndex((t) => t.isPreview);
+          if (previewIdx < 0) return [...prev, fileTab];
+          const replaced = prev[previewIdx]!;
+          const next = [...prev];
+          next[previewIdx] = { ...fileTab, groupId: replaced.groupId ?? null };
+          return next;
+        });
+      } else {
+        setTabs((prev) => [...prev, fileTab]);
+      }
       setActiveTabId(newId);
     },
     [activeSchema, tabs],
@@ -851,6 +961,7 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
                 dirtyTabIds={dirtyTabIds}
                 onActivate={setActiveTabId}
                 onClose={closeTab}
+                onPinTab={pinTab}
                 onNewSql={() => openSql()}
                 onCreateGroupFromTab={createGroupFromTab}
                 onAddTabToGroup={addTabToGroup}

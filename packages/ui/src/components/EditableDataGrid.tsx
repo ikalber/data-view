@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 import clsx from "clsx";
 import type {
   CellValue,
@@ -18,6 +25,13 @@ export interface RowEdit {
   changes: Record<string, string>;
 }
 
+/** A row staged for INSERT. `values` only contains columns the user touched —
+ * missing columns fall back to the column's DB default. */
+export interface NewRow {
+  tempId: string;
+  values: Record<string, string>;
+}
+
 interface Props {
   result: QueryResult | null;
   /** Column metadata from describeTable, indexed by name. */
@@ -33,6 +47,23 @@ interface Props {
   onToggleSort: (column: string) => void;
   /** Commits a cell change to the dirty buffer (or removes it). */
   onChangeCell: (pkKey: string, colName: string, value: string | null) => void;
+
+  /** Rows staged for INSERT. Rendered below the regular rows. */
+  newRows?: NewRow[];
+  /** tempId → error from last save attempt. */
+  newRowErrors?: Map<string, string>;
+  /** Update a single cell on a staged row. */
+  onChangeNewRowCell?: (tempId: string, colName: string, value: string) => void;
+  /** Remove a staged row from the buffer. */
+  onRemoveNewRow?: (tempId: string) => void;
+  /** Distribute a tab/newline-delimited paste across cells, creating new
+   * staged rows if the paste has more rows than currently exist below the
+   * starting row. */
+  onPasteMatrix?: (
+    startTempId: string,
+    startCol: string,
+    matrix: string[][],
+  ) => void;
 }
 
 /** Computes a stable key for a row from its PK columns' values. */
@@ -80,6 +111,10 @@ function isBoolType(dataType: string | undefined): boolean {
   return /^(bool|boolean|bit\(1\)|tinyint\(1\))/i.test(dataType);
 }
 
+type EditingCell =
+  | { kind: "edit"; pkKey: string; col: string }
+  | { kind: "new"; tempId: string; col: string };
+
 export function EditableDataGrid({
   result,
   columnsInfo,
@@ -90,10 +125,13 @@ export function EditableDataGrid({
   loading,
   onToggleSort,
   onChangeCell,
+  newRows,
+  newRowErrors,
+  onChangeNewRowCell,
+  onRemoveNewRow,
+  onPasteMatrix,
 }: Props) {
-  const [editing, setEditing] = useState<{ pkKey: string; col: string } | null>(
-    null,
-  );
+  const [editing, setEditing] = useState<EditingCell | null>(null);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
 
@@ -125,7 +163,12 @@ export function EditableDataGrid({
     return <div className="dv-empty">Sin columnas.</div>;
   }
 
-  function commit(pkKey: string, col: string, original: string, value: string) {
+  function commitExisting(
+    pkKey: string,
+    col: string,
+    original: string,
+    value: string,
+  ) {
     setEditing(null);
     if (value === original) {
       // No change — clear any prior edit for this cell.
@@ -135,16 +178,26 @@ export function EditableDataGrid({
     }
   }
 
+  function commitNew(tempId: string, col: string, value: string) {
+    setEditing(null);
+    onChangeNewRowCell?.(tempId, col, value);
+  }
+
   function cancel() {
     setEditing(null);
   }
 
   function startEdit(pkKey: string, col: string, currentDisplay: string) {
     setDraft(currentDisplay);
-    setEditing({ pkKey, col });
+    setEditing({ kind: "edit", pkKey, col });
   }
 
-  function onKeyDown(
+  function startEditNew(tempId: string, col: string, currentDisplay: string) {
+    setDraft(currentDisplay);
+    setEditing({ kind: "new", tempId, col });
+  }
+
+  function onKeyDownExisting(
     e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
     pkKey: string,
     col: string,
@@ -152,7 +205,7 @@ export function EditableDataGrid({
   ) {
     if (e.key === "Enter") {
       e.preventDefault();
-      commit(pkKey, col, original, draft);
+      commitExisting(pkKey, col, original, draft);
     } else if (e.key === "Escape") {
       e.preventDefault();
       cancel();
@@ -160,15 +213,61 @@ export function EditableDataGrid({
       // Commit on Tab so users can move to next cell quickly. We don't
       // jump focus to neighbour cells (skip for now) but at least the value
       // is preserved.
-      commit(pkKey, col, original, draft);
+      commitExisting(pkKey, col, original, draft);
     }
   }
+
+  function onKeyDownNew(
+    e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
+    tempId: string,
+    col: string,
+  ) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitNew(tempId, col, draft);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+    } else if (e.key === "Tab") {
+      commitNew(tempId, col, draft);
+    }
+  }
+
+  /** Parse a clipboard string into a row × col matrix. Returns null if the
+   * paste is a single cell — caller should let the default paste happen. */
+  function parsePasteMatrix(text: string): string[][] | null {
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    let lines = normalized.split("\n");
+    // Strip a single trailing empty line (common when copying from Excel/Sheets).
+    if (lines.length > 1 && lines[lines.length - 1] === "") {
+      lines = lines.slice(0, -1);
+    }
+    const matrix = lines.map((l) => l.split("\t"));
+    if (matrix.length <= 1 && (matrix[0]?.length ?? 0) <= 1) return null;
+    return matrix;
+  }
+
+  function onPasteNewCell(
+    e: ClipboardEvent<HTMLInputElement | HTMLSelectElement>,
+    tempId: string,
+    col: string,
+  ) {
+    if (!onPasteMatrix) return;
+    const text = e.clipboardData.getData("text");
+    const matrix = parsePasteMatrix(text);
+    if (!matrix) return; // single cell — let default paste fill the input
+    e.preventDefault();
+    setEditing(null);
+    onPasteMatrix(tempId, col, matrix);
+  }
+
+  const showRowNumberCol = pkColumns.length > 0 || (newRows && newRows.length > 0);
 
   return (
     <table className="dv-table" role="grid">
       <thead>
         <tr>
-          {pkColumns.length > 0 && <th style={{ width: 40 }}>#</th>}
+          {showRowNumberCol && <th style={{ width: 40 }}>#</th>}
           {result.columns.map((c) => {
             const isSorted = sort?.column === c.name;
             const isPk = pkColumns.includes(c.name);
@@ -199,7 +298,7 @@ export function EditableDataGrid({
           const rowError = pkKey ? rowErrors.get(pkKey) : undefined;
           return (
             <tr key={pkKey ?? rowIdx}>
-              {pkColumns.length > 0 && (
+              {showRowNumberCol && (
                 <td className="is-pk" style={{ textAlign: "right" }}>
                   {rowIdx + 1}
                 </td>
@@ -213,7 +312,7 @@ export function EditableDataGrid({
                   editedVal !== undefined && editedVal !== original;
                 const readonly = !pkKey || isReadOnly(colInfo);
                 const isEditing =
-                  editing != null &&
+                  editing?.kind === "edit" &&
                   editing.pkKey === pkKey &&
                   editing.col === c.name;
 
@@ -247,8 +346,8 @@ export function EditableDataGrid({
                         colInfo,
                         draft,
                         setDraft,
-                        (e) => onKeyDown(e, pkKey, c.name, original),
-                        () => commit(pkKey, c.name, original, draft),
+                        (e) => onKeyDownExisting(e, pkKey, c.name, original),
+                        () => commitExisting(pkKey, c.name, original, draft),
                         inputRef,
                       )
                     ) : (
@@ -275,6 +374,96 @@ export function EditableDataGrid({
             </tr>
           );
         })}
+        {newRows?.map((nr, nrIdx) => {
+          const nrError = newRowErrors?.get(nr.tempId);
+          return (
+            <tr key={`new:${nr.tempId}`} className="is-new-row">
+              {showRowNumberCol && (
+                <td
+                  className="is-pk is-new-row-marker"
+                  style={{ textAlign: "right" }}
+                  title="Fila nueva"
+                >
+                  <button
+                    type="button"
+                    className="dv-new-row-remove"
+                    onClick={() => onRemoveNewRow?.(nr.tempId)}
+                    aria-label="Eliminar fila nueva"
+                    title="Eliminar fila"
+                  >
+                    ×
+                  </button>
+                </td>
+              )}
+              {result.columns.map((c) => {
+                const colInfo = columnsInfo.get(c.name);
+                const cellVal = nr.values[c.name];
+                const touched = cellVal !== undefined;
+                const display = cellVal ?? "";
+                const isEditing =
+                  editing?.kind === "new" &&
+                  editing.tempId === nr.tempId &&
+                  editing.col === c.name;
+                const placeholderText = colInfo?.default
+                  ? `(default: ${colInfo.default})`
+                  : colInfo?.nullable
+                  ? "NULL"
+                  : "—";
+                return (
+                  <td
+                    key={c.name}
+                    className={clsx(
+                      "is-new-cell",
+                      !isEditing && "is-editable",
+                      isEditing && "is-editing",
+                      touched && "is-new-touched",
+                      nrError && "is-row-error",
+                      colInfo?.isPrimaryKey && "is-pk",
+                    )}
+                    onDoubleClick={() =>
+                      startEditNew(nr.tempId, c.name, display)
+                    }
+                    title={`${c.name}${colInfo ? ` · ${colInfo.dataType}` : ""}${
+                      colInfo?.nullable ? "" : " · NOT NULL"
+                    }`}
+                  >
+                    {isEditing ? (
+                      renderEditor(
+                        c.name,
+                        colInfo,
+                        draft,
+                        setDraft,
+                        (e) => onKeyDownNew(e, nr.tempId, c.name),
+                        () => commitNew(nr.tempId, c.name, draft),
+                        inputRef,
+                        (e) => onPasteNewCell(e, nr.tempId, c.name),
+                      )
+                    ) : (
+                      <span
+                        style={{
+                          display: "block",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          fontStyle: !touched ? "italic" : "normal",
+                          color: !touched
+                            ? "var(--dv-text-mute)"
+                            : undefined,
+                        }}
+                      >
+                        {!touched
+                          ? placeholderText
+                          : display === ""
+                          ? "NULL"
+                          : display}
+                      </span>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -288,6 +477,7 @@ function renderEditor(
   onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>) => void,
   onCommit: () => void,
   ref: React.MutableRefObject<HTMLInputElement | HTMLSelectElement | null>,
+  onPaste?: (e: ClipboardEvent<HTMLInputElement | HTMLSelectElement>) => void,
 ) {
   const enumValues = parseEnumValues(colInfo?.dataType);
   if (enumValues) {
@@ -340,6 +530,7 @@ function renderEditor(
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onKeyDown={onKeyDown}
+      onPaste={onPaste}
       onBlur={onCommit}
       spellCheck={false}
       autoCapitalize="off"

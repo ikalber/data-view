@@ -23,6 +23,8 @@ interface Props {
   dirtyTabIds: Set<string>;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  /** Pin a preview tab — called on double-click. */
+  onPinTab: (id: string) => void;
   onNewSql: () => void;
   // grouping
   onCreateGroupFromTab: (tabId: string, name: string) => void;
@@ -45,6 +47,7 @@ export function WorkspaceTabBar({
   dirtyTabIds,
   onActivate,
   onClose,
+  onPinTab,
   onNewSql,
   onCreateGroupFromTab,
   onAddTabToGroup,
@@ -223,6 +226,7 @@ export function WorkspaceTabBar({
             const isActive = t.id === activeTabId;
             const dirty = dirtyTabIds.has(t.id);
             const inGroup = !!t.groupId;
+            const isPreview = !!t.isPreview;
             return (
               <div
                 key={t.id}
@@ -233,11 +237,17 @@ export function WorkspaceTabBar({
                   "dv-ws-tab",
                   isActive && "is-active",
                   inGroup && "is-grouped",
+                  isPreview && "is-preview",
                 )}
                 onClick={() => onActivate(t.id)}
+                onDoubleClick={() => onPinTab(t.id)}
                 onMouseDown={(e) => onTabMouseDown(e, t.id)}
                 onContextMenu={(e) => onTabContextMenu(e, t.id)}
-                title={tabTooltip(t)}
+                title={
+                  isPreview
+                    ? `${tabTooltip(t)} — Preview (doble clic para fijar)`
+                    : tabTooltip(t)
+                }
                 data-item-idx={idx}
               >
                 <span

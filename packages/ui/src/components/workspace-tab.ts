@@ -20,6 +20,11 @@ export type WorkspaceTab = WorkspaceTabBody & {
   /** Optional tab-group id. Tabs sharing a groupId render together inside the
    * group's collapsible chip in the tab bar. */
   groupId?: string | null;
+  /** Preview tab (VS Code-style). Single-click in the sidebar opens an item
+   * here; opening another preview replaces this one. Becomes pinned (false)
+   * on edit, double-click, drag, or any explicit "keep open" interaction.
+   * At most one tab should have isPreview=true at any time. */
+  isPreview?: boolean;
 };
 
 export type WorkspaceTabKind = WorkspaceTabBody["kind"];

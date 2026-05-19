@@ -44,8 +44,9 @@ interface Props {
     sql: string;
     fileId: string | null;
   }) => { fileId: string; title: string } | null;
-  /** Open a saved file in a new tab. */
-  onOpenFile: (file: SavedFile) => void;
+  /** Open a saved file in a new tab. Pass `{ preview: true }` for VS Code-style
+   * preview behavior (single-click) or omit/false to pin. */
+  onOpenFile: (file: SavedFile, opts?: { preview?: boolean }) => void;
   /** Delete a saved file. */
   onDeleteFile: (file: SavedFile) => void;
   /** Whether this editor is the currently visible tab. */
@@ -389,7 +390,11 @@ export function QueryEditor({
                     className="dv-sql-file-row"
                     onClick={() => {
                       setFilesOpen(false);
-                      onOpenFile(f);
+                      onOpenFile(f, { preview: true });
+                    }}
+                    onDoubleClick={() => {
+                      setFilesOpen(false);
+                      onOpenFile(f, { preview: false });
                     }}
                     title={`Actualizado ${new Date(
                       f.updatedAt,

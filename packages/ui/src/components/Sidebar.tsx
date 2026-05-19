@@ -16,6 +16,14 @@ import type { WorkspaceTab, WorkspaceTabKind } from "./workspace-tab";
 type Mode = "select" | "tree";
 const MODE_KEY = "dbview.tablesMode";
 
+/** Preview tabs (VS Code-style): single-click in the sidebar opens an item
+ * as a preview that will be replaced by the next preview open. Pass
+ * `{ preview: false }` (or omit on a double-click handler) to open the item
+ * pinned. */
+interface OpenOpts {
+  preview?: boolean;
+}
+
 interface Props {
   connectionId: string | null;
   driver: DatabaseDriver | null;
@@ -23,12 +31,12 @@ interface Props {
   activeSchema: string | null;
   onChangeSchema: (schema: string) => void;
   onSchemasLoaded: (schemas: SchemaInfo[]) => void;
-  onOpenTable: (schema: string, name: string) => void;
-  onOpenDatabase: (schema: string) => void;
-  onOpenConnectionOverview: () => void;
+  onOpenTable: (schema: string, name: string, opts?: OpenOpts) => void;
+  onOpenDatabase: (schema: string, opts?: OpenOpts) => void;
+  onOpenConnectionOverview: (opts?: OpenOpts) => void;
   onOpenSql: () => void;
-  onOpenSchema: () => void;
-  onOpenHistory: () => void;
+  onOpenSchema: (opts?: OpenOpts) => void;
+  onOpenHistory: (opts?: OpenOpts) => void;
   /** When true, replace the schema/tables UI with a cross-connection tree. */
   globalTreeView?: boolean;
   /** All known connections (used by the global tree). */
@@ -44,11 +52,13 @@ interface Props {
     connectionId: string,
     schema: string,
     name: string,
+    opts?: OpenOpts,
   ) => void;
   /** Open a database overview tab in a (potentially different) connection. */
   onOpenDatabaseInConnection?: (
     connectionId: string,
     schema: string,
+    opts?: OpenOpts,
   ) => void;
 }
 
@@ -56,7 +66,12 @@ interface NavItem {
   key: WorkspaceTabKind;
   label: string;
   icon: string;
-  onClick: () => void;
+  /** Single-click opens as preview; double-click opens pinned. */
+  onClick: (opts?: OpenOpts) => void;
+  /** When true, suppress the double-click → pin behavior. Used for the
+   * "SQL Editor" nav button, whose semantics are "create a new file" rather
+   * than "navigate to a singleton tab". */
+  alwaysPinned?: boolean;
 }
 
 function readInitialMode(): Mode {
@@ -139,7 +154,14 @@ export function Sidebar({
         icon: "▤",
         onClick: onOpenConnectionOverview,
       },
-      { key: "sql", label: "SQL Editor", icon: "›_", onClick: onOpenSql },
+      {
+        key: "sql",
+        label: "SQL Editor",
+        icon: "›_",
+        // "+ new SQL" is a creation action, not a navigation — always pinned.
+        onClick: () => onOpenSql(),
+        alwaysPinned: true,
+      },
       { key: "schema", label: "Schema", icon: "◇", onClick: onOpenSchema },
       { key: "history", label: "History", icon: "↻", onClick: onOpenHistory },
     ],
@@ -303,10 +325,11 @@ export function Sidebar({
   }
 
   /** Picking a database from the dropdown opens its overview tab AND seeds
-   * the sidebar so the tables list switches over. */
-  function selectDatabase(name: string) {
+   * the sidebar so the tables list switches over. Single-click opens as
+   * preview; double-click pins. */
+  function selectDatabase(name: string, opts?: OpenOpts) {
     onChangeSchema(name);
-    onOpenDatabase(name);
+    onOpenDatabase(name, opts);
     setPickerOpen(false);
     setPickerFilter("");
   }
@@ -421,23 +444,28 @@ export function Sidebar({
     connId: string,
     schema: string,
     name: string,
+    opts?: OpenOpts,
   ) {
     if (onOpenTableInConnection) {
-      onOpenTableInConnection(connId, schema, name);
+      onOpenTableInConnection(connId, schema, name, opts);
     } else if (connId === connectionId) {
-      onOpenTable(schema, name);
+      onOpenTable(schema, name, opts);
     }
   }
 
   /** Click on a schema in the global tree: expand/collapse AND open the
    * database-overview tab (switching connections if needed). Mirrors the
    * local tree mode, which both expands and opens. */
-  function handleGlobalSchemaClick(connId: string, schema: string) {
+  function handleGlobalSchemaClick(
+    connId: string,
+    schema: string,
+    opts?: OpenOpts,
+  ) {
     toggleGlobalSchema(connId, schema);
     if (onOpenDatabaseInConnection) {
-      onOpenDatabaseInConnection(connId, schema);
+      onOpenDatabaseInConnection(connId, schema, opts);
     } else if (connId === connectionId) {
-      onOpenDatabase(schema);
+      onOpenDatabase(schema, opts);
     }
   }
 
@@ -480,7 +508,14 @@ export function Sidebar({
               "dv-nav-item",
               isNavActive(item.key) && "is-active",
             )}
-            onClick={item.onClick}
+            onClick={() =>
+              item.alwaysPinned ? item.onClick() : item.onClick({ preview: true })
+            }
+            onDoubleClick={
+              item.alwaysPinned
+                ? undefined
+                : () => item.onClick({ preview: false })
+            }
             role="button"
             tabIndex={0}
           >
@@ -573,7 +608,10 @@ export function Sidebar({
                     "dv-schema-picker-option",
                     s.name === activeSchema && "is-active",
                   )}
-                  onClick={() => selectDatabase(s.name)}
+                  onClick={() => selectDatabase(s.name, { preview: true })}
+                  onDoubleClick={() =>
+                    selectDatabase(s.name, { preview: false })
+                  }
                 >
                   <span className="dv-schema-picker-option-check">
                     {s.name === activeSchema ? "✓" : ""}
@@ -593,7 +631,10 @@ export function Sidebar({
                         "dv-schema-picker-option",
                         s.name === activeSchema && "is-active",
                       )}
-                      onClick={() => selectDatabase(s.name)}
+                      onClick={() => selectDatabase(s.name, { preview: true })}
+                      onDoubleClick={() =>
+                        selectDatabase(s.name, { preview: false })
+                      }
                     >
                       <span className="dv-schema-picker-option-check">
                         {s.name === activeSchema ? "✓" : ""}
@@ -688,7 +729,12 @@ export function Sidebar({
                 <div
                   key={`${r.schema}.${r.name}`}
                   className={clsx("dv-table-row", isActive && "is-active")}
-                  onClick={() => onOpenTable(r.schema, r.name)}
+                  onClick={() =>
+                    onOpenTable(r.schema, r.name, { preview: true })
+                  }
+                  onDoubleClick={() =>
+                    onOpenTable(r.schema, r.name, { preview: false })
+                  }
                   title={`${r.schema}.${r.name}${
                     r.approxRowCount != null
                       ? ` · ${r.approxRowCount.toLocaleString()} filas`
@@ -754,8 +800,12 @@ export function Sidebar({
                   )}
                   onClick={() => {
                     onChangeSchema(s.name);
-                    onOpenDatabase(s.name);
+                    onOpenDatabase(s.name, { preview: true });
                     void toggleExpand(s.name);
+                  }}
+                  onDoubleClick={() => {
+                    onChangeSchema(s.name);
+                    onOpenDatabase(s.name, { preview: false });
                   }}
                 >
                   <span className="dv-schema-tree-caret">
@@ -784,7 +834,12 @@ export function Sidebar({
                             "dv-table-row-nested",
                             isActive && "is-active",
                           )}
-                          onClick={() => onOpenTable(r.schema, r.name)}
+                          onClick={() =>
+                            onOpenTable(r.schema, r.name, { preview: true })
+                          }
+                          onDoubleClick={() =>
+                            onOpenTable(r.schema, r.name, { preview: false })
+                          }
                           title={`${r.schema}.${r.name}${
                             r.approxRowCount != null
                               ? ` · ${r.approxRowCount.toLocaleString()} filas`
@@ -854,8 +909,13 @@ interface GlobalTreeProps {
   errors: Record<string, string>;
   onToggleFolder: (key: string) => void;
   onToggleConn: (id: string) => void;
-  onSchemaClick: (connId: string, schema: string) => void;
-  onTableClick: (connId: string, schema: string, name: string) => void;
+  onSchemaClick: (connId: string, schema: string, opts?: OpenOpts) => void;
+  onTableClick: (
+    connId: string,
+    schema: string,
+    name: string,
+    opts?: OpenOpts,
+  ) => void;
 }
 
 function renderGlobalTree(p: GlobalTreeProps) {
@@ -1010,7 +1070,8 @@ function renderGlobalTree(p: GlobalTreeProps) {
             isActiveSchema && "is-active",
             s.isSystem && "is-system",
           )}
-          onClick={() => onSchemaClick(c.id, s.name)}
+          onClick={() => onSchemaClick(c.id, s.name, { preview: true })}
+          onDoubleClick={() => onSchemaClick(c.id, s.name, { preview: false })}
         >
           <span className="dv-schema-tree-caret">
             {isExpanded ? "▾" : "▸"}
@@ -1046,7 +1107,12 @@ function renderGlobalTree(p: GlobalTreeProps) {
                     "dv-conn-tree-table",
                     active && "is-active",
                   )}
-                  onClick={() => onTableClick(c.id, r.schema, r.name)}
+                  onClick={() =>
+                    onTableClick(c.id, r.schema, r.name, { preview: true })
+                  }
+                  onDoubleClick={() =>
+                    onTableClick(c.id, r.schema, r.name, { preview: false })
+                  }
                   title={`${c.name} · ${r.schema}.${r.name}`}
                 >
                   <span className="dv-table-row-icon">

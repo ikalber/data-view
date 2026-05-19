@@ -25,6 +25,7 @@ import {
   cellToString,
   parseEnumValues,
   rowPkKey,
+  type NewRow,
   type RowEdit,
   type SortState,
 } from "./EditableDataGrid";
@@ -137,6 +138,31 @@ function buildUpdateSql(
   )} SET ${setClauses} WHERE ${whereClauses}`;
 }
 
+function buildInsertSql(
+  driver: DatabaseDriver | null,
+  schema: string,
+  name: string,
+  values: Record<string, string>,
+  columnsInfo: Map<string, ColumnInfo>,
+): string {
+  const cols = Object.keys(values);
+  const colList = cols.map((c) => quoteIdent(driver, c)).join(", ");
+  const valList = cols
+    .map((c) => quoteValue(driver, columnsInfo.get(c), values[c] ?? ""))
+    .join(", ");
+  return `INSERT INTO ${quoteIdent(driver, schema)}.${quoteIdent(
+    driver,
+    name,
+  )} (${colList}) VALUES (${valList})`;
+}
+
+function makeTempId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function TablePane({
   connectionId,
   driver,
@@ -170,6 +196,12 @@ export function TablePane({
   // Survives sort/refetch because keyed by PK values, not row index.
   const [edits, setEdits] = useState<Map<string, RowEdit>>(new Map());
   const [rowErrors, setRowErrors] = useState<Map<string, string>>(new Map());
+  // Rows staged for INSERT. Identified by tempId so the buffer survives sort /
+  // refetch (which only updates `data`).
+  const [newRows, setNewRows] = useState<NewRow[]>([]);
+  const [newRowErrors, setNewRowErrors] = useState<Map<string, string>>(
+    new Map(),
+  );
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -180,6 +212,12 @@ export function TablePane({
     });
     return n;
   }, [edits]);
+
+  // Only rows with at least one user-supplied value count toward the save bar.
+  const populatedNewRows = useMemo(
+    () => newRows.filter((r) => Object.keys(r.values).length > 0),
+    [newRows],
+  );
 
   // Build a map name → ColumnInfo from describeTable for the grid.
   const columnsInfo = useMemo(() => {
@@ -312,6 +350,8 @@ export function TablePane({
     setSort(null);
     setEdits(new Map());
     setRowErrors(new Map());
+    setNewRows([]);
+    setNewRowErrors(new Map());
     setSaveError(null);
     setHasMore(false);
     setLoadingMore(false);
@@ -406,7 +446,69 @@ export function TablePane({
   function discardAll() {
     setEdits(new Map());
     setRowErrors(new Map());
+    setNewRows([]);
+    setNewRowErrors(new Map());
     setSaveError(null);
+  }
+
+  function addNewRow() {
+    setNewRows((prev) => [...prev, { tempId: makeTempId(), values: {} }]);
+  }
+
+  function onChangeNewRowCell(tempId: string, col: string, value: string) {
+    setNewRows((prev) =>
+      prev.map((r) =>
+        r.tempId === tempId
+          ? { ...r, values: { ...r.values, [col]: value } }
+          : r,
+      ),
+    );
+  }
+
+  function onRemoveNewRow(tempId: string) {
+    setNewRows((prev) => prev.filter((r) => r.tempId !== tempId));
+    setNewRowErrors((prev) => {
+      if (!prev.has(tempId)) return prev;
+      const next = new Map(prev);
+      next.delete(tempId);
+      return next;
+    });
+  }
+
+  /** Distribute a tab/newline-delimited matrix starting at (tempId, startCol),
+   * appending new staged rows when the matrix is taller than what's currently
+   * staged below the starting row. Extra columns past the table are ignored. */
+  function onPasteMatrix(
+    startTempId: string,
+    startCol: string,
+    matrix: string[][],
+  ) {
+    const cols = data?.columns.map((c) => c.name) ?? [];
+    const startColIdx = cols.indexOf(startCol);
+    if (startColIdx < 0) return;
+
+    setNewRows((prev) => {
+      const next = [...prev];
+      const startRowIdx = next.findIndex((r) => r.tempId === startTempId);
+      if (startRowIdx < 0) return prev;
+
+      matrix.forEach((rowValues, i) => {
+        const rowIdx = startRowIdx + i;
+        while (rowIdx >= next.length) {
+          next.push({ tempId: makeTempId(), values: {} });
+        }
+        const target = next[rowIdx];
+        if (!target) return;
+        const newValues = { ...target.values };
+        rowValues.forEach((v, j) => {
+          const colName = cols[startColIdx + j];
+          if (colName == null) return;
+          newValues[colName] = v;
+        });
+        next[rowIdx] = { ...target, values: newValues };
+      });
+      return next;
+    });
   }
 
   // We need the original PK values for each dirty pkKey to build the WHERE.
@@ -429,7 +531,8 @@ export function TablePane({
   }
 
   const saveAll = useCallback(async () => {
-    if (saving || edits.size === 0) return;
+    if (saving) return;
+    if (edits.size === 0 && populatedNewRows.length === 0) return;
     setSaving(true);
     setSaveError(null);
 
@@ -461,13 +564,36 @@ export function TablePane({
       }
     }
 
+    const remainingNew: NewRow[] = [];
+    const newErrs = new Map<string, string>();
+    // Preserve rows that were created but never filled — the user might still
+    // be typing into them; we don't want to silently drop their work.
+    for (const nr of newRows) {
+      if (Object.keys(nr.values).length === 0) {
+        remainingNew.push(nr);
+        continue;
+      }
+      const sql = buildInsertSql(driver, schema, name, nr.values, columnsInfo);
+      try {
+        await transport.runQuery(connectionId, sql);
+        // Drop the row from the staged buffer — the refetch below will surface
+        // the persisted version with server-assigned defaults / auto-increment.
+      } catch (e) {
+        remainingNew.push(nr);
+        newErrs.set(nr.tempId, e instanceof Error ? e.message : String(e));
+      }
+    }
+
     setEdits(remaining);
     setRowErrors(errs);
+    setNewRows(remainingNew);
+    setNewRowErrors(newErrs);
     setSaving(false);
 
-    if (errs.size > 0) {
+    const totalErrs = errs.size + newErrs.size;
+    if (totalErrs > 0) {
       setSaveError(
-        `${errs.size} fila${errs.size === 1 ? "" : "s"} con error — revisá las celdas resaltadas`,
+        `${totalErrs} fila${totalErrs === 1 ? "" : "s"} con error — revisá las celdas resaltadas`,
       );
     } else {
       setSaveError(null);
@@ -479,6 +605,8 @@ export function TablePane({
     saving,
     edits,
     rowErrors,
+    newRows,
+    populatedNewRows.length,
     driver,
     schema,
     name,
@@ -498,14 +626,14 @@ export function TablePane({
     if (tab !== "data") return;
     const onKey = (e: globalThis.KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-        if (edits.size === 0) return;
+        if (edits.size === 0 && populatedNewRows.length === 0) return;
         e.preventDefault();
         void saveAllRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tab, edits.size]);
+  }, [tab, edits.size, populatedNewRows.length]);
 
   const sqlForTable = `SELECT * FROM ${quoteIdent(driver, schema)}.${quoteIdent(
     driver,
@@ -707,6 +835,19 @@ export function TablePane({
                 )}
               </button>
             </div>
+            <button
+              type="button"
+              className="dv-button is-sm"
+              onClick={addNewRow}
+              disabled={!details}
+              title={
+                details
+                  ? "Agregar una fila en blanco al final"
+                  : "Esperando metadata de la tabla…"
+              }
+            >
+              + Agregar fila
+            </button>
             <span className="dv-table-toolbar-meta">
               {data
                 ? `${data.rows.length} filas${hasMore ? "+" : ""} · ${data.durationMs}ms`
@@ -719,7 +860,8 @@ export function TablePane({
           <div className="dv-where-hint">
             Escribí solo la expresión SQL después de <code>WHERE</code>. Doble
             click en una celda para editar · <code>Ctrl+S</code> para guardar
-            cambios.
+            cambios · "+ Agregar fila" para insertar nuevas (podés pegar varias
+            filas separadas por tabs / saltos de línea).
           </div>
 
           {error && <div className="dv-error">{error}</div>}
@@ -730,12 +872,24 @@ export function TablePane({
             </div>
           )}
 
-          {edits.size > 0 && (
+          {(edits.size > 0 || populatedNewRows.length > 0) && (
             <div className="dv-save-bar">
               <span style={{ fontWeight: 500 }}>
-                {dirtyCount} celda{dirtyCount === 1 ? "" : "s"} modificada
-                {dirtyCount === 1 ? "" : "s"} en {edits.size} fila
-                {edits.size === 1 ? "" : "s"}
+                {edits.size > 0 && (
+                  <>
+                    {dirtyCount} celda{dirtyCount === 1 ? "" : "s"} modificada
+                    {dirtyCount === 1 ? "" : "s"} en {edits.size} fila
+                    {edits.size === 1 ? "" : "s"}
+                  </>
+                )}
+                {edits.size > 0 && populatedNewRows.length > 0 && " · "}
+                {populatedNewRows.length > 0 && (
+                  <>
+                    {populatedNewRows.length} fila
+                    {populatedNewRows.length === 1 ? "" : "s"} nueva
+                    {populatedNewRows.length === 1 ? "" : "s"}
+                  </>
+                )}
               </span>
               <span style={{ fontSize: 12 }}>
                 <span className="dv-kbd">⌘S</span> /{" "}
@@ -778,6 +932,11 @@ export function TablePane({
                 loading={loading}
                 onToggleSort={onToggleSort}
                 onChangeCell={onChangeCell}
+                newRows={newRows}
+                newRowErrors={newRowErrors}
+                onChangeNewRowCell={onChangeNewRowCell}
+                onRemoveNewRow={onRemoveNewRow}
+                onPasteMatrix={onPasteMatrix}
               />
               {data && data.rows.length > 0 && loadingMore && (
                 <div className="dv-load-indicator">Cargando más…</div>
