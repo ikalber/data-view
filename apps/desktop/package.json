@@ -17,6 +17,7 @@
     "@data-view/core": "workspace:*",
     "@data-view/ui": "workspace:*",
     "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

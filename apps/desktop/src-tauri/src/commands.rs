@@ -1,10 +1,14 @@
 use crate::db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::export::{
+    self, ExportDatabaseOptions, ExportDatabaseResult, ExportTableOptions, ExportTableResult,
+};
 use crate::model::{
     ConnectionConfig, ConnectionInput, Folder, FolderInput, PageOptions, QueryResult,
     RelationInfo, SchemaInfo, TableDetails, Tag, TagInput, TestConnectionResult,
 };
 use crate::state::AppState;
+use std::path::PathBuf;
 use tauri::State;
 
 #[tauri::command]
@@ -120,4 +124,36 @@ pub async fn fetch_table_data(
     let conn = state.store().resolve(&connection_id)?;
     let opts = options.unwrap_or_default();
     db::fetch_table_data(&conn, &schema, &name, &opts).await
+}
+
+#[tauri::command]
+pub async fn export_table(
+    connection_id: String,
+    schema: String,
+    name: String,
+    options: ExportTableOptions,
+    target_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<ExportTableResult> {
+    let conn = state.store().resolve(&connection_id)?;
+    let path = PathBuf::from(target_path);
+    if path.as_os_str().is_empty() {
+        return Err(AppError::msg("ruta de destino vacía"));
+    }
+    export::export_table_to_path(&conn, &schema, &name, options, path).await
+}
+
+#[tauri::command]
+pub async fn export_database(
+    connection_id: String,
+    options: ExportDatabaseOptions,
+    target_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<ExportDatabaseResult> {
+    let conn = state.store().resolve(&connection_id)?;
+    let path = PathBuf::from(target_path);
+    if path.as_os_str().is_empty() {
+        return Err(AppError::msg("ruta de destino vacía"));
+    }
+    export::export_database_to_path(&conn, options, path).await
 }

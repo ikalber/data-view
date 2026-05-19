@@ -198,7 +198,7 @@ pub struct TableDetails {
     pub foreign_keys: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultColumn {
     pub name: String,

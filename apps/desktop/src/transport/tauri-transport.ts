@@ -1,8 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  ExportDatabaseOptions,
+  ExportDatabaseResult,
+  ExportFormat,
+  ExportTableOptions,
+  ExportTableResult,
   Folder,
   FolderInput,
   PageOptions,
@@ -15,6 +21,7 @@ import type {
   TestConnectionResult,
   Transport,
 } from "@data-view/core";
+import { defaultExportFileName, EXPORT_FORMATS } from "@data-view/core";
 
 /**
  * Each method maps 1:1 to a Tauri command defined in src-tauri/src/commands.rs.
@@ -58,4 +65,47 @@ export const tauriTransport: Transport = {
     }),
   fetchTableData: (connectionId, schema, name, options?: PageOptions) =>
     call<QueryResult>("fetch_table_data", { connectionId, schema, name, options }),
+  exportTable: async (connectionId, schema, name, options: ExportTableOptions) => {
+    const targetPath = await pickSaveLocation(name, options.format);
+    if (!targetPath) throw new ExportCancelled();
+    return call<ExportTableResult>("export_table", {
+      connectionId,
+      schema,
+      name,
+      options,
+      targetPath,
+    });
+  },
+  exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
+    const targetPath = await pickSaveLocation("database", "sql");
+    if (!targetPath) throw new ExportCancelled();
+    return call<ExportDatabaseResult>("export_database", {
+      connectionId,
+      options,
+      targetPath,
+    });
+  },
 };
+
+export class ExportCancelled extends Error {
+  constructor() {
+    super("Export cancelado por el usuario");
+    this.name = "ExportCancelled";
+  }
+}
+
+async function pickSaveLocation(
+  baseName: string,
+  format: ExportFormat,
+): Promise<string | null> {
+  const suggested = defaultExportFileName(baseName, format);
+  const ext = EXPORT_FORMATS.find((f) => f.value === format)?.ext ?? format;
+  const result = await save({
+    defaultPath: suggested,
+    filters: [
+      { name: format.toUpperCase(), extensions: [ext] },
+      { name: "Todos", extensions: ["*"] },
+    ],
+  });
+  return result;
+}

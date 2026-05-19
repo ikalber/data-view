@@ -14,6 +14,8 @@ import type {
   CellValue,
   ColumnInfo,
   DatabaseDriver,
+  ExportFormat,
+  ExportTableResult,
   QueryResult,
   TableDetails,
 } from "@data-view/core";
@@ -27,6 +29,7 @@ import {
   type SortState,
 } from "./EditableDataGrid";
 import { StructureEditor } from "./StructureEditor";
+import { ExportMenu } from "./ExportMenu";
 
 interface Props {
   connectionId: string;
@@ -513,6 +516,41 @@ export function TablePane({
       : ""
   }\nLIMIT 100;`;
 
+  const [exportStatus, setExportStatus] = useState<
+    | { kind: "running"; format: ExportFormat }
+    | { kind: "done"; result: ExportTableResult }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+
+  const onExportFullTable = useCallback(
+    async (format: ExportFormat) => {
+      setExportStatus({ kind: "running", format });
+      try {
+        const result = await transport.exportTable(connectionId, schema, name, {
+          format,
+          where: appliedWhere.trim() || undefined,
+          includeHeader: true,
+          batchSize: 100,
+        });
+        setExportStatus({ kind: "done", result });
+      } catch (e) {
+        setExportStatus({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+    [transport, connectionId, schema, name, appliedWhere],
+  );
+
+  // Auto-dismiss the success badge after a few seconds.
+  useEffect(() => {
+    if (exportStatus?.kind !== "done") return;
+    const t = setTimeout(() => setExportStatus(null), 8000);
+    return () => clearTimeout(t);
+  }, [exportStatus]);
+
   const colCount = details?.columns.length;
   const filterDirty = whereInput.trim() !== appliedWhere.trim();
 
@@ -542,6 +580,14 @@ export function TablePane({
           )}
         </div>
         <div className="dv-page-actions">
+          <ExportMenu
+            result={data}
+            baseName={name}
+            driver={driver}
+            schema={schema}
+            table={name}
+            onExportFullTable={onExportFullTable}
+          />
           <button
             className="dv-button"
             onClick={() => onOpenInSqlEditor(sqlForTable)}
@@ -550,6 +596,56 @@ export function TablePane({
           </button>
         </div>
       </div>
+
+      {exportStatus && (
+        <div
+          className={clsx(
+            "dv-export-status",
+            exportStatus.kind === "error" && "is-error",
+            exportStatus.kind === "running" && "is-busy",
+          )}
+        >
+          {exportStatus.kind === "running" && (
+            <>
+              Exportando tabla a <code>{exportStatus.format}</code>… (puede tardar
+              varios segundos)
+            </>
+          )}
+          {exportStatus.kind === "done" && (
+            <>
+              ✓ {exportStatus.result.rowCount.toLocaleString()} filas exportadas ·{" "}
+              {(exportStatus.result.bytes / 1024).toFixed(1)} KB ·{" "}
+              {exportStatus.result.durationMs}ms
+              {exportStatus.result.filePath && (
+                <>
+                  {" "}— <code>{exportStatus.result.filePath}</code>
+                </>
+              )}
+              <button
+                type="button"
+                className="dv-export-status-close"
+                onClick={() => setExportStatus(null)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </>
+          )}
+          {exportStatus.kind === "error" && (
+            <>
+              Error exportando: {exportStatus.message}
+              <button
+                type="button"
+                className="dv-export-status-close"
+                onClick={() => setExportStatus(null)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="dv-tabs" role="tablist">
         {TABS.map((t) => (

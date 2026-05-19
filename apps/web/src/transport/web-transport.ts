@@ -2,6 +2,10 @@ import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  ExportDatabaseOptions,
+  ExportDatabaseResult,
+  ExportTableOptions,
+  ExportTableResult,
   Folder,
   FolderInput,
   PageOptions,
@@ -88,4 +92,74 @@ export const webTransport: Transport = {
       method: "POST",
       body: JSON.stringify({ schema, name, options }),
     }),
+  exportTable: async (connectionId, schema, name, options: ExportTableOptions) => {
+    const meta = await downloadExport(
+      `/api/connections/${connectionId}/export-table`,
+      { schema, name, options },
+      options.format,
+      name,
+    );
+    const out: ExportTableResult = {
+      rowCount: 0,
+      bytes: meta.bytes,
+      durationMs: meta.durationMs,
+      format: options.format,
+      fileName: meta.fileName,
+    };
+    return out;
+  },
+  exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
+    const meta = await downloadExport(
+      `/api/connections/${connectionId}/export-database`,
+      { options },
+      "sql",
+      "database",
+    );
+    const out: ExportDatabaseResult = {
+      bytes: meta.bytes,
+      durationMs: meta.durationMs,
+      tableCount: 0,
+      rowCount: 0,
+      fileName: meta.fileName,
+    };
+    return out;
+  },
 };
+
+async function downloadExport(
+  url: string,
+  payload: unknown,
+  defaultFormat: string,
+  fallbackBase: string,
+): Promise<{ bytes: number; durationMs: number; fileName: string }> {
+  const start = performance.now();
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let err = res.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.error) err = String(parsed.error);
+    } catch {}
+    throw new Error(err);
+  }
+  const filenameHeader = res.headers.get("X-Export-Filename") ?? `${fallbackBase}.${defaultFormat}`;
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  const objUrl = URL.createObjectURL(blob);
+  a.href = objUrl;
+  a.download = filenameHeader;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objUrl), 0);
+  return {
+    bytes: blob.size,
+    durationMs: Math.round(performance.now() - start),
+    fileName: filenameHeader,
+  };
+}

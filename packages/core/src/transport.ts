@@ -13,6 +13,12 @@ import type {
   TagInput,
   TestConnectionResult,
 } from "./types";
+import type {
+  ExportDatabaseOptions,
+  ExportDatabaseResult,
+  ExportTableOptions,
+  ExportTableResult,
+} from "./export";
 
 /**
  * Transport is the boundary between UI and the host environment.
@@ -54,6 +60,26 @@ export interface Transport {
     name: string,
     options?: PageOptions,
   ): Promise<QueryResult>;
+
+  /**
+   * Stream a whole table to disk (desktop) or to the browser as a download
+   * (web). Returns stats so the UI can render "X rows · Y MB" feedback.
+   */
+  exportTable(
+    connectionId: string,
+    schema: string,
+    name: string,
+    options: ExportTableOptions,
+  ): Promise<ExportTableResult>;
+
+  /**
+   * Dump multiple schemas to a single .sql file. Always emits SQL — other
+   * formats don't roundtrip schema reliably across drivers.
+   */
+  exportDatabase(
+    connectionId: string,
+    options: ExportDatabaseOptions,
+  ): Promise<ExportDatabaseResult>;
 }
 
 export interface RunQueryOptions {

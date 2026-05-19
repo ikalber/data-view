@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ConnectionConfig, RelationInfo } from "@data-view/core";
 import { useTransport } from "../transport-context";
 import { formatBytes } from "../format";
+import { ExportDatabaseModal } from "./ExportDatabaseModal";
 
 interface Props {
   connection: ConnectionConfig;
@@ -25,6 +26,7 @@ export function OverviewPane({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<SortBy>("rows");
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     if (!activeSchema) {
@@ -96,6 +98,13 @@ export function OverviewPane({
         </div>
         <div className="dv-page-actions">
           <button
+            className="dv-button"
+            onClick={() => setExportOpen(true)}
+            title="Exportar base de datos completa"
+          >
+            Exportar DB
+          </button>
+          <button
             className="dv-button is-primary"
             onClick={onOpenSqlEditor}
             disabled={!activeSchema}
@@ -104,6 +113,14 @@ export function OverviewPane({
           </button>
         </div>
       </div>
+
+      {exportOpen && (
+        <ExportDatabaseModal
+          connection={connection}
+          initialSchema={activeSchema}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
 
       {!activeSchema ? (
         <div className="dv-card" style={{ marginTop: 24 }}>

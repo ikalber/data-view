@@ -1,6 +1,12 @@
 import mysql from "mysql2/promise";
-import type { QueryResult, QueryResultColumn } from "@data-view/core";
-import type { DriverAdapter, ResolvedConnection } from "./types";
+import type { ColumnInfo, QueryResult, QueryResultColumn } from "@data-view/core";
+import { quoteIdent as qiCore } from "@data-view/core";
+import type {
+  DriverAdapter,
+  IterateTableOptions,
+  ResolvedConnection,
+  TableBatch,
+} from "./types";
 
 const QUERY_LIMIT = 5000;
 
@@ -301,7 +307,95 @@ export const mysqlDriver: DriverAdapter = {
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT ? OFFSET ?`;
     return this.runQuery(c, sql, { params: [limit, offset] });
   },
+
+  async *iterateTable(c, opts) {
+    // mysql2 supports server-side streaming via .stream(), which holds the
+    // connection open and emits a row event per record. We collect into
+    // fixed-size batches before yielding to keep downstream JSON encoding
+    // efficient.
+    const batchSize = Math.max(1, opts.batchSize ?? 1000);
+    const where = opts.where?.trim() ? `WHERE ${opts.where.trim()}` : "";
+    const sql = `SELECT * FROM ${ident(opts.schema)}.${ident(opts.name)} ${where}`;
+    const conn = await mysql.createConnection({
+      host: c.host,
+      port: c.port,
+      user: c.username,
+      password: c.password,
+      database: c.database,
+      ssl: c.ssl ? {} : undefined,
+      connectTimeout: 10_000,
+      rowsAsArray: true,
+      dateStrings: true,
+      multipleStatements: false,
+    });
+    try {
+      // The promise wrapper hides the streaming API; reach through to the
+      // underlying connection where .query() returns a Query object with
+      // .stream().
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const raw: any = (conn as unknown as { connection: unknown }).connection;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const stream: NodeJS.ReadableStream = raw.query(sql).stream({
+        highWaterMark: batchSize,
+      });
+      let batchRows: unknown[][] = [];
+      let columns: QueryResultColumn[] = [];
+      let fields: mysql.FieldPacket[] | null = null;
+      // Capture column metadata via the 'fields' event.
+      (stream as NodeJS.EventEmitter).on("fields", (f: mysql.FieldPacket[]) => {
+        fields = f;
+        columns = f.map((field) => ({
+          name: field.name,
+          dataType: typeName(field.type ?? -1),
+        }));
+      });
+      for await (const row of stream as AsyncIterable<unknown>) {
+        if (columns.length === 0 && fields) {
+          columns = (fields as mysql.FieldPacket[]).map((field) => ({
+            name: field.name,
+            dataType: typeName(field.type ?? -1),
+          }));
+        }
+        batchRows.push((row as unknown[]).map(normalizeCell));
+        if (batchRows.length >= batchSize) {
+          yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
+          batchRows = [];
+        }
+      }
+      if (batchRows.length > 0) {
+        yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
+      }
+    } finally {
+      await conn.end().catch(() => undefined);
+    }
+  },
+
+  generateCreateTableSql(_c, schema, name, columns) {
+    return buildMysqlCreateTable(schema, name, columns);
+  },
 };
+
+function buildMysqlCreateTable(
+  schema: string,
+  name: string,
+  columns: ColumnInfo[],
+): string {
+  const colLines = columns.map((c) => {
+    const parts = [qiCore("mysql", c.name), c.dataType];
+    if (!c.nullable) parts.push("NOT NULL");
+    if (c.default != null) parts.push(`DEFAULT ${c.default}`);
+    return "  " + parts.join(" ");
+  });
+  const pk = columns.filter((c) => c.isPrimaryKey).map((c) => qiCore("mysql", c.name));
+  if (pk.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  return `CREATE TABLE ${qiCore("mysql", schema)}.${qiCore("mysql", name)} (\n${colLines.join(
+    ",\n",
+  )}\n);`;
+}
+
+export type { IterateTableOptions };
 
 // MySQL field type codes -> friendly names. See mysql2 Types.
 const TYPES: Record<number, string> = {

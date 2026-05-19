@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod error;
+mod export;
 mod model;
 mod state;
 mod storage;
@@ -11,6 +12,7 @@ use state::AppState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_connections,
@@ -29,6 +31,8 @@ pub fn run() {
             commands::describe_table,
             commands::run_query,
             commands::fetch_table_data,
+            commands::export_table,
+            commands::export_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running data-view");

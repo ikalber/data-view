@@ -45,6 +45,11 @@ interface Props {
     schema: string,
     name: string,
   ) => void;
+  /** Open a database overview tab in a (potentially different) connection. */
+  onOpenDatabaseInConnection?: (
+    connectionId: string,
+    schema: string,
+  ) => void;
 }
 
 interface NavItem {
@@ -83,6 +88,7 @@ export function Sidebar({
   folders = [],
   onSelectConnection,
   onOpenTableInConnection,
+  onOpenDatabaseInConnection,
 }: Props) {
   const transport = useTransport();
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
@@ -423,6 +429,18 @@ export function Sidebar({
     }
   }
 
+  /** Click on a schema in the global tree: expand/collapse AND open the
+   * database-overview tab (switching connections if needed). Mirrors the
+   * local tree mode, which both expands and opens. */
+  function handleGlobalSchemaClick(connId: string, schema: string) {
+    toggleGlobalSchema(connId, schema);
+    if (onOpenDatabaseInConnection) {
+      onOpenDatabaseInConnection(connId, schema);
+    } else if (connId === connectionId) {
+      onOpenDatabase(schema);
+    }
+  }
+
   // Group connections by folder for the global tree. Mirrors ConnectionPicker.
   const globalGrouped = useMemo(() => {
     const map = new Map<string | null, ConnectionConfig[]>();
@@ -615,7 +633,7 @@ export function Sidebar({
           errors: globalError,
           onToggleFolder: toggleGlobalFolder,
           onToggleConn: toggleGlobalConn,
-          onToggleSchema: toggleGlobalSchema,
+          onSchemaClick: handleGlobalSchemaClick,
           onTableClick: handleGlobalTableClick,
         })
       ) : mode === "select" ? (
@@ -836,7 +854,7 @@ interface GlobalTreeProps {
   errors: Record<string, string>;
   onToggleFolder: (key: string) => void;
   onToggleConn: (id: string) => void;
-  onToggleSchema: (connId: string, schema: string) => void;
+  onSchemaClick: (connId: string, schema: string) => void;
   onTableClick: (connId: string, schema: string, name: string) => void;
 }
 
@@ -858,7 +876,7 @@ function renderGlobalTree(p: GlobalTreeProps) {
     errors,
     onToggleFolder,
     onToggleConn,
-    onToggleSchema,
+    onSchemaClick,
     onTableClick,
   } = p;
 
@@ -992,7 +1010,7 @@ function renderGlobalTree(p: GlobalTreeProps) {
             isActiveSchema && "is-active",
             s.isSystem && "is-system",
           )}
-          onClick={() => onToggleSchema(c.id, s.name)}
+          onClick={() => onSchemaClick(c.id, s.name)}
         >
           <span className="dv-schema-tree-caret">
             {isExpanded ? "▾" : "▸"}

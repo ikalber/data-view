@@ -519,15 +519,15 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     [openTab],
   );
 
-  // When the user clicks a table in the global tree that belongs to a DIFFERENT
-  // connection, we (a) switch the active connection and (b) enqueue the table
-  // open until the new connection's tabs have been hydrated. Otherwise the tab
+  // When the user clicks an item in the global tree that belongs to a DIFFERENT
+  // connection, we (a) switch the active connection and (b) enqueue the open
+  // until the new connection's tabs have been hydrated. Otherwise the tab
   // would be written to localStorage for the *previous* connection.
-  const [pendingOpen, setPendingOpen] = useState<{
-    connId: string;
-    schema: string;
-    name: string;
-  } | null>(null);
+  const [pendingOpen, setPendingOpen] = useState<
+    | { kind: "table"; connId: string; schema: string; name: string }
+    | { kind: "database"; connId: string; schema: string }
+    | null
+  >(null);
 
   const openTableInConnection = useCallback(
     (connId: string, schema: string, name: string) => {
@@ -535,22 +535,11 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
         openTable(schema, name);
         return;
       }
-      setPendingOpen({ connId, schema, name });
+      setPendingOpen({ kind: "table", connId, schema, name });
       setActiveId(connId);
     },
     [activeId, openTable],
   );
-
-  // Flush a pending cross-connection open once hydration of the target
-  // connection finishes (so the new tab lands in the right localStorage slot).
-  useEffect(() => {
-    if (!pendingOpen) return;
-    if (hydratedFor !== pendingOpen.connId) return;
-    const { schema, name } = pendingOpen;
-    openTab({ kind: "table", schema, name });
-    setActiveSchema(schema);
-    setPendingOpen(null);
-  }, [pendingOpen, hydratedFor, openTab]);
 
   const openDatabase = useCallback(
     (schema: string) => {
@@ -559,6 +548,35 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     },
     [openTab],
   );
+
+  const openDatabaseInConnection = useCallback(
+    (connId: string, schema: string) => {
+      if (connId === activeId) {
+        openDatabase(schema);
+        return;
+      }
+      setPendingOpen({ kind: "database", connId, schema });
+      setActiveId(connId);
+    },
+    [activeId, openDatabase],
+  );
+
+  // Flush a pending cross-connection open once hydration of the target
+  // connection finishes (so the new tab lands in the right localStorage slot).
+  useEffect(() => {
+    if (!pendingOpen) return;
+    if (hydratedFor !== pendingOpen.connId) return;
+    if (pendingOpen.kind === "table") {
+      const { schema, name } = pendingOpen;
+      openTab({ kind: "table", schema, name });
+      setActiveSchema(schema);
+    } else {
+      const { schema } = pendingOpen;
+      openTab({ kind: "database-overview", schema });
+      setActiveSchema(schema);
+    }
+    setPendingOpen(null);
+  }, [pendingOpen, hydratedFor, openTab]);
 
   const openConnectionOverview = useCallback(() => {
     openTab({ kind: "connection-overview" });
@@ -801,6 +819,7 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
           tags={tags}
           onSelectConnection={selectConnection}
           onOpenTableInConnection={openTableInConnection}
+          onOpenDatabaseInConnection={openDatabaseInConnection}
         />
         <SidebarResizer
           width={sidebarWidth}

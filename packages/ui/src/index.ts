@@ -24,10 +24,18 @@ export { OverviewPane } from "./components/OverviewPane";
 export { ConnectionOverviewPane } from "./components/ConnectionOverviewPane";
 export { SchemaDiagramPane } from "./components/SchemaDiagramPane";
 export { formatBytes, formatUptime, shortServerVersion } from "./format";
+export {
+  formatExport,
+  exportMimeType,
+  downloadString,
+  type FormatOptions,
+} from "./export-format";
 export { TablePane } from "./components/TablePane";
 export { EditableDataGrid } from "./components/EditableDataGrid";
 export { QueryEditor } from "./components/QueryEditor";
 export { ResultsTable } from "./components/ResultsTable";
+export { ExportMenu } from "./components/ExportMenu";
+export { ExportDatabaseModal } from "./components/ExportDatabaseModal";
 export { HistoryPane } from "./components/HistoryPane";
 export {
   useQueryHistory,

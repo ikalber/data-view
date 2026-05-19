@@ -1,6 +1,12 @@
 import sql from "mssql";
-import type { QueryResult } from "@data-view/core";
-import type { DriverAdapter, ResolvedConnection } from "./types";
+import type { ColumnInfo, QueryResult, QueryResultColumn } from "@data-view/core";
+import { quoteIdent as qiCore } from "@data-view/core";
+import type {
+  DriverAdapter,
+  IterateTableOptions,
+  ResolvedConnection,
+  TableBatch,
+} from "./types";
 
 const QUERY_LIMIT = 5000;
 
@@ -301,4 +307,116 @@ export const mssqlDriver: DriverAdapter = {
     const sqlText = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
     return this.runQuery(c, sqlText);
   },
+
+  async *iterateTable(c, opts) {
+    // tiberius/mssql doesn't have a clean cursor API, so we OFFSET/FETCH-page
+    // through the table. We need a stable ORDER BY — fall back to ordering by
+    // the first column if no primary key is available.
+    const batchSize = Math.max(1, opts.batchSize ?? 1000);
+    const where = opts.where?.trim() ? `WHERE ${opts.where.trim()}` : "";
+    const pool = await new sql.ConnectionPool({
+      server: c.host,
+      port: c.port,
+      user: c.username,
+      password: c.password,
+      database: c.database,
+      options: {
+        encrypt: !!c.ssl,
+        trustServerCertificate: c.options?.trustServerCertificate === "true",
+        ...(c.options?.instanceName ? { instanceName: c.options.instanceName } : {}),
+      },
+      connectionTimeout: 10_000,
+      requestTimeout: 600_000,
+    }).connect();
+    try {
+      // Discover an ORDER BY column — PK preferred, else first column. SQL
+      // Server requires this for OFFSET/FETCH.
+      const orderCol = await firstOrderingColumn(pool, opts.schema, opts.name);
+      const orderBy = orderCol ? ident(orderCol) : "(SELECT NULL)";
+      let offset = 0;
+      let columns: QueryResultColumn[] = [];
+      while (true) {
+        const req = pool.request();
+        req.arrayRowMode = true;
+        const r = await req.query(
+          `SELECT * FROM ${ident(opts.schema)}.${ident(opts.name)} ${where} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
+        );
+        const cols = (r.recordset?.columns
+          ? Object.values(r.recordset.columns)
+          : []) as Array<{ name: string; type: { name: string } }>;
+        if (columns.length === 0) {
+          columns = cols.map((col) => ({
+            name: col.name,
+            dataType: col.type?.name ?? "unknown",
+          }));
+        }
+        const rows = ((r.recordset as unknown as Array<unknown[]>) ?? []).map((row) =>
+          row.map(normalizeCell),
+        );
+        if (rows.length === 0) break;
+        yield { columns, rows: rows as QueryResult["rows"] } as TableBatch;
+        if (rows.length < batchSize) break;
+        offset += rows.length;
+      }
+    } finally {
+      await pool.close().catch(() => undefined);
+    }
+  },
+
+  generateCreateTableSql(_c, schema, name, columns) {
+    return buildMssqlCreateTable(schema, name, columns);
+  },
 };
+
+async function firstOrderingColumn(
+  pool: sql.ConnectionPool,
+  schema: string,
+  name: string,
+): Promise<string | null> {
+  const r = await pool
+    .request()
+    .input("schema", sql.NVarChar, schema)
+    .input("name", sql.NVarChar, name)
+    .query<{ column_name: string }>(
+      `SELECT TOP 1 kcu.column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON kcu.constraint_name = tc.constraint_name
+       WHERE tc.constraint_type = 'PRIMARY KEY'
+         AND tc.table_schema = @schema AND tc.table_name = @name
+       ORDER BY kcu.ordinal_position`,
+    );
+  if (r.recordset[0]?.column_name) return r.recordset[0].column_name;
+  const r2 = await pool
+    .request()
+    .input("schema", sql.NVarChar, schema)
+    .input("name", sql.NVarChar, name)
+    .query<{ column_name: string }>(
+      `SELECT TOP 1 column_name FROM information_schema.columns
+       WHERE table_schema = @schema AND table_name = @name
+       ORDER BY ordinal_position`,
+    );
+  return r2.recordset[0]?.column_name ?? null;
+}
+
+function buildMssqlCreateTable(
+  schema: string,
+  name: string,
+  columns: ColumnInfo[],
+): string {
+  const colLines = columns.map((c) => {
+    const parts = [qiCore("mssql", c.name), c.dataType];
+    parts.push(c.nullable ? "NULL" : "NOT NULL");
+    if (c.default != null) parts.push(`DEFAULT ${c.default}`);
+    return "  " + parts.join(" ");
+  });
+  const pk = columns.filter((c) => c.isPrimaryKey).map((c) => qiCore("mssql", c.name));
+  if (pk.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  return `CREATE TABLE ${qiCore("mssql", schema)}.${qiCore("mssql", name)} (\n${colLines.join(
+    ",\n",
+  )}\n);`;
+}
+
+export type { IterateTableOptions };

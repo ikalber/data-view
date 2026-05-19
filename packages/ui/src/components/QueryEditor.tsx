@@ -13,6 +13,7 @@ import type { DatabaseDriver, QueryResult, SchemaInfo } from "@data-view/core";
 import { useTransport } from "../transport-context";
 import { recordHistoryEntry } from "../query-history";
 import { ResultsTable } from "./ResultsTable";
+import { ExportMenu } from "./ExportMenu";
 
 export interface SavedFile {
   id: string;
@@ -435,11 +436,24 @@ export function QueryEditor({
       </div>
       <div className="dv-results">
         <div className="dv-results-header">
-          {runtime.error
-            ? "Error"
-            : runtime.result
-            ? `${runtime.result.rowCount} filas`
-            : "Resultados"}
+          <span>
+            {runtime.error
+              ? "Error"
+              : runtime.result
+              ? `${runtime.result.rowCount} filas`
+              : "Resultados"}
+          </span>
+          {runtime.result && !runtime.error && (
+            <ExportMenu
+              result={runtime.result}
+              baseName={fileId ? title : "query"}
+              driver={driver}
+              schema={database ?? undefined}
+              table="query"
+              label="Export"
+              className="is-sm"
+            />
+          )}
         </div>
         <div className="dv-results-body">
           {runtime.error ? (

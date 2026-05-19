@@ -1,6 +1,12 @@
 import { Client, type ClientConfig } from "pg";
-import type { QueryResult, QueryResultColumn } from "@data-view/core";
-import type { DriverAdapter, ResolvedConnection } from "./types";
+import type { ColumnInfo, QueryResult, QueryResultColumn } from "@data-view/core";
+import { quoteIdent as qiCore } from "@data-view/core";
+import type {
+  DriverAdapter,
+  IterateTableOptions,
+  ResolvedConnection,
+  TableBatch,
+} from "./types";
 
 const QUERY_LIMIT = 5000;
 
@@ -319,4 +325,74 @@ export const postgresDriver: DriverAdapter = {
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT $1 OFFSET $2`;
     return this.runQuery(c, sql, { params: [limit, offset] });
   },
+
+  async *iterateTable(c, opts) {
+    // Server-side cursor — keeps memory bounded for huge tables without
+    // emitting a giant ORDER BY (Postgres preserves cursor order from the
+    // underlying scan, which is stable within a transaction).
+    const batchSize = Math.max(1, opts.batchSize ?? 1000);
+    const where = opts.where?.trim() ? `WHERE ${opts.where.trim()}` : "";
+    const cursorName = `dv_export_${Date.now().toString(36)}`;
+    const client = new Client(clientConfig(c));
+    await client.connect();
+    try {
+      await client.query("BEGIN READ ONLY");
+      await client.query(
+        `DECLARE ${ident(cursorName)} NO SCROLL CURSOR FOR SELECT * FROM ${ident(
+          opts.schema,
+        )}.${ident(opts.name)} ${where}`,
+      );
+      while (true) {
+        const r = await client.query({
+          text: `FETCH FORWARD ${batchSize} FROM ${ident(cursorName)}`,
+          rowMode: "array",
+        });
+        const columns: QueryResultColumn[] = (r.fields ?? []).map((f) => ({
+          name: f.name,
+          dataType: pgOidToName(f.dataTypeID),
+        }));
+        const rows = (r.rows as unknown[][]).map((row) =>
+          row.map((cell) => normalizeCell(cell)),
+        );
+        if (rows.length === 0) break;
+        yield { columns, rows } as TableBatch;
+        if (rows.length < batchSize) break;
+      }
+      await client.query(`CLOSE ${ident(cursorName)}`);
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw e;
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  },
+
+  generateCreateTableSql(_c, schema, name, columns) {
+    return buildPostgresCreateTable(schema, name, columns);
+  },
 };
+
+function buildPostgresCreateTable(
+  schema: string,
+  name: string,
+  columns: ColumnInfo[],
+): string {
+  const colLines = columns.map((c) => {
+    const parts = [qiCore("postgres", c.name), c.dataType];
+    if (!c.nullable) parts.push("NOT NULL");
+    if (c.default != null) parts.push(`DEFAULT ${c.default}`);
+    return "  " + parts.join(" ");
+  });
+  const pk = columns.filter((c) => c.isPrimaryKey).map((c) => qiCore("postgres", c.name));
+  if (pk.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  return `CREATE TABLE ${qiCore("postgres", schema)}.${qiCore(
+    "postgres",
+    name,
+  )} (\n${colLines.join(",\n")}\n);`;
+}
+
+// Suppress unused-import warning when no helpers reference TableBatch directly.
+export type { IterateTableOptions };
