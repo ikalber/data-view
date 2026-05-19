@@ -34,3 +34,6 @@ pnpm-debug.log*
 *.sqlite3
 *.db
 data/local.db
+
+# claude code (worktrees efímeros de agents)
+.claude/worktrees/
