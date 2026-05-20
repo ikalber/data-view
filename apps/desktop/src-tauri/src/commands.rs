@@ -5,8 +5,8 @@ use crate::export::{
 };
 use crate::model::{
     ConnectionConfig, ConnectionInput, ConnectionOverview, CreateSchemaOptions, CreateTableOptions,
-    Folder, FolderInput, PageOptions, QueryResult, RelationInfo, SchemaInfo, TableDetails, Tag,
-    TagInput, TestConnectionResult,
+    DropOptions, Folder, FolderInput, PageOptions, QueryResult, RelationInfo, SchemaInfo,
+    TableDetails, Tag, TagInput, TestConnectionResult,
 };
 use crate::state::AppState;
 use std::path::PathBuf;
@@ -186,6 +186,41 @@ pub async fn create_table(
 ) -> AppResult<()> {
     let conn = state.store().resolve(&connection_id)?;
     db::create_table(&conn, &options).await
+}
+
+#[tauri::command]
+pub async fn drop_table(
+    connection_id: String,
+    schema: String,
+    name: String,
+    options: Option<DropOptions>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::drop_table(&conn, &schema, &name, &options.unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn drop_schema(
+    connection_id: String,
+    name: String,
+    options: Option<DropOptions>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::drop_schema(&conn, &name, &options.unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn truncate_table(
+    connection_id: String,
+    schema: String,
+    name: String,
+    options: Option<DropOptions>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::truncate_table(&conn, &schema, &name, &options.unwrap_or_default()).await
 }
 
 /// Read a UTF-8 text file from disk. Used by the desktop app to open .sql

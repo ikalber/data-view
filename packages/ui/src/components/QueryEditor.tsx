@@ -6,14 +6,15 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
 } from "react";
 import clsx from "clsx";
 import type { DatabaseDriver, QueryResult, SchemaInfo } from "@data-view/core";
+import { format as formatSql } from "sql-formatter";
 import { useTransport } from "../transport-context";
 import { recordHistoryEntry } from "../query-history";
 import { ResultsTable } from "./ResultsTable";
 import { ExportMenu } from "./ExportMenu";
+import { SqlCodeEditor } from "./SqlCodeEditor";
 
 export interface SavedFile {
   id: string;
@@ -98,7 +99,6 @@ export function QueryEditor({
   const [dbFilter, setDbFilter] = useState("");
   const filesMenuRef = useRef<HTMLDivElement>(null);
   const dbMenuRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const dbLabel = driver === "postgres" ? "Schema" : "Database";
   const userSchemas = useMemo(
@@ -208,26 +208,64 @@ export function QueryEditor({
     setRuntime({ result: null, error: null, running: false });
   }, [connectionId]);
 
-  function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      void run();
-      return;
+  // ── Format / EXPLAIN ───────────────────────────────────────────────────────
+  // sql-formatter accepts a dialect string per driver. "sql" is the safe
+  // fallback when we don't know.
+  const formatterLanguage = useMemo(() => {
+    switch (driver) {
+      case "postgres":
+        return "postgresql" as const;
+      case "mysql":
+        return "mysql" as const;
+      case "mssql":
+        return "tsql" as const;
+      default:
+        return "sql" as const;
     }
-    if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
-      e.preventDefault();
-      saveActive();
-    }
-  }
+  }, [driver]);
 
-  // Focus when this tab becomes active.
-  useEffect(() => {
-    if (isActive) {
-      // Defer so the pane is visible before focusing.
-      const t = setTimeout(() => textareaRef.current?.focus(), 0);
-      return () => clearTimeout(t);
+  const formatCurrent = useCallback(() => {
+    if (!sql.trim()) return;
+    try {
+      const out = formatSql(sql, {
+        language: formatterLanguage,
+        keywordCase: "upper",
+        tabWidth: 2,
+      });
+      onChangeSql(out);
+    } catch {
+      // sql-formatter throws on syntactically broken SQL — keep the buffer
+      // untouched and surface a transient error via the result pane.
+      setRuntime((r) => ({
+        ...r,
+        error: "No se pudo formatear (revisá la sintaxis del SQL).",
+      }));
     }
-  }, [isActive]);
+  }, [sql, formatterLanguage, onChangeSql]);
+
+  const runExplain = useCallback(async () => {
+    if (!sql.trim() || runtime.running) return;
+    // Strip a leading EXPLAIN if the user already typed one so we don't end
+    // up with "EXPLAIN EXPLAIN …". MSSQL uses SET SHOWPLAN_TEXT ON which is
+    // session-scoped and doesn't compose cleanly here — we use the same
+    // EXPLAIN keyword on all three drivers; on MSSQL it falls back to the
+    // server's "Showplan All" approximation via SET SHOWPLAN_ALL.
+    const cleaned = sql.replace(/^\s*explain\s+/i, "").trim();
+    const wrapped =
+      driver === "mssql"
+        ? `SET SHOWPLAN_TEXT ON;\n${cleaned}`
+        : `EXPLAIN ${cleaned}`;
+    setRuntime({ result: null, error: null, running: true });
+    try {
+      const result = await transport.runQuery(connectionId, wrapped, {
+        schema: database ?? undefined,
+      });
+      setRuntime({ result, error: null, running: false });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setRuntime({ result: null, error: message, running: false });
+    }
+  }, [sql, runtime.running, driver, transport, connectionId, database]);
 
   return (
     <div className="dv-sql-pane">
@@ -358,6 +396,22 @@ export function QueryEditor({
         </button>
         <button
           className="dv-button"
+          onClick={runExplain}
+          disabled={runtime.running || !sql.trim()}
+          title="Ejecuta EXPLAIN <query> para ver el plan del optimizador"
+        >
+          Explain
+        </button>
+        <button
+          className="dv-button"
+          onClick={formatCurrent}
+          disabled={!sql.trim()}
+          title="Reformatear el SQL (pretty-print)"
+        >
+          Format
+        </button>
+        <button
+          className="dv-button"
           onClick={saveActive}
           title={fileId ? `Guardar "${title}"` : "Guardar como archivo"}
         >
@@ -444,13 +498,16 @@ export function QueryEditor({
         </span>
       </div>
       <div className="dv-editor">
-        <textarea
-          ref={textareaRef}
+        <SqlCodeEditor
           value={sql}
-          onChange={(e) => onChangeSql(e.target.value)}
-          onKeyDown={onKeyDown}
-          spellCheck={false}
-          placeholder="-- Escribí tu SQL acá. Ctrl+Enter para ejecutar, Ctrl+S para guardar."
+          onChange={onChangeSql}
+          onSubmit={() => void run()}
+          onSave={saveActive}
+          autoFocus={isActive}
+          driver={driver}
+          database={database}
+          connectionId={connectionId}
+          schemas={schemas}
         />
       </div>
       <div className="dv-results">

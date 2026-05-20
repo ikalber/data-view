@@ -65,6 +65,11 @@ interface Props {
   /** Open the "Create table" modal targeting the given schema (or the active
    * one if omitted). */
   onCreateTable?: (schema?: string | null) => void;
+  /** Trigger DROP SCHEMA/DATABASE on the given name (with confirmation handled
+   * by the parent). */
+  onDropDatabase?: (name: string) => void;
+  /** Trigger DROP TABLE on the given schema.name. */
+  onDropTable?: (schema: string, name: string) => void;
   /** Bumped by the parent after a create-schema/create-table action so the
    * sidebar refetches schemas and relations without losing local state. */
   refreshToken?: number;
@@ -114,6 +119,8 @@ export function Sidebar({
   onOpenDatabaseInConnection,
   onCreateDatabase,
   onCreateTable,
+  onDropDatabase,
+  onDropTable,
   refreshToken = 0,
 }: Props) {
   const transport = useTransport();
@@ -778,11 +785,16 @@ export function Sidebar({
                   onDoubleClick={() =>
                     onOpenTable(r.schema, r.name, { preview: false })
                   }
+                  onContextMenu={(e) => {
+                    if (!onDropTable) return;
+                    e.preventDefault();
+                    onDropTable(r.schema, r.name);
+                  }}
                   title={`${r.schema}.${r.name}${
                     r.approxRowCount != null
                       ? ` · ${r.approxRowCount.toLocaleString()} filas`
                       : ""
-                  }`}
+                  }${onDropTable ? " — clic derecho para DROP" : ""}`}
                 >
                   <span className="dv-table-row-icon">
                     {r.kind === "view"
@@ -850,6 +862,16 @@ export function Sidebar({
                     onChangeSchema(s.name);
                     onOpenDatabase(s.name, { preview: false });
                   }}
+                  onContextMenu={(e) => {
+                    if (s.isSystem || !onDropDatabase) return;
+                    e.preventDefault();
+                    onDropDatabase(s.name);
+                  }}
+                  title={
+                    !s.isSystem && onDropDatabase
+                      ? "Clic derecho para DROP"
+                      : undefined
+                  }
                 >
                   <span className="dv-schema-tree-caret">
                     {isExpanded ? "▾" : "▸"}
@@ -898,11 +920,16 @@ export function Sidebar({
                           onDoubleClick={() =>
                             onOpenTable(r.schema, r.name, { preview: false })
                           }
+                          onContextMenu={(e) => {
+                            if (!onDropTable) return;
+                            e.preventDefault();
+                            onDropTable(r.schema, r.name);
+                          }}
                           title={`${r.schema}.${r.name}${
                             r.approxRowCount != null
                               ? ` · ${r.approxRowCount.toLocaleString()} filas`
                               : ""
-                          }`}
+                          }${onDropTable ? " — clic derecho para DROP" : ""}`}
                         >
                           <span className="dv-table-row-icon">
                             {r.kind === "view"

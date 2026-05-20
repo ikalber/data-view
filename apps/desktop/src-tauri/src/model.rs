@@ -293,3 +293,10 @@ pub struct CreateTableOptions {
     pub name: String,
     pub columns: Vec<CreateTableColumn>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropOptions {
+    #[serde(default)]
+    pub cascade: bool,
+}

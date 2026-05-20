@@ -921,6 +921,32 @@ input[type="checkbox"]:disabled:checked {
   letter-spacing: 0.01em;
 }
 
+/* CodeMirror SQL editor — match the panel's bg/font and fill the available
+ * height. CodeMirror sets its own colors via its theme prop; we only ensure
+ * the host container behaves correctly. */
+.dv-sql-codemirror {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dv-sql-codemirror,
+.dv-sql-codemirror > div,
+.dv-sql-codemirror .cm-editor {
+  height: 100%;
+}
+
+.dv-sql-codemirror .cm-editor {
+  font-family: var(--dv-font-code);
+  font-size: 13px;
+}
+
+.dv-sql-codemirror .cm-scroller {
+  font-family: var(--dv-font-code);
+  line-height: 1.55;
+}
+
 /* ── Results ─────────────────────────────────────────────────────────────── */
 .dv-results {
   border-top: 1px solid var(--dv-border);

@@ -38,6 +38,7 @@ export { ExportMenu } from "./components/ExportMenu";
 export { ExportDatabaseModal } from "./components/ExportDatabaseModal";
 export { CreateDatabaseModal } from "./components/CreateDatabaseModal";
 export { CreateTableModal } from "./components/CreateTableModal";
+export { ConfirmDialog } from "./components/ConfirmDialog";
 export { HistoryPane } from "./components/HistoryPane";
 export {
   useQueryHistory,

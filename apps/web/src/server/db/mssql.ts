@@ -390,6 +390,29 @@ export const mssqlDriver: DriverAdapter = {
     );
     await this.runQuery(c, sqlText);
   },
+
+  async dropTable(c, schema, name) {
+    // SQL Server doesn't take CASCADE on DROP TABLE; the user has to drop
+    // FKs/views first or pass cascade=false (default).
+    await this.runQuery(
+      c,
+      `DROP TABLE IF EXISTS ${ident(schema)}.${ident(name)}`,
+    );
+  },
+
+  async dropSchema(c, name) {
+    // `DROP SCHEMA … IF EXISTS` is supported in SQL Server 2016+; fall back
+    // gracefully on the error otherwise — the user can retry via the SQL
+    // editor.
+    await this.runQuery(c, `DROP SCHEMA IF EXISTS ${ident(name)}`);
+  },
+
+  async truncateTable(c, schema, name) {
+    await this.runQuery(
+      c,
+      `TRUNCATE TABLE ${ident(schema)}.${ident(name)}`,
+    );
+  },
 };
 
 async function firstOrderingColumn(

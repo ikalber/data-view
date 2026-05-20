@@ -398,6 +398,26 @@ export const mysqlDriver: DriverAdapter = {
     );
     await this.runQuery(c, sqlText);
   },
+
+  async dropTable(c, schema, name) {
+    // MySQL doesn't accept CASCADE on DROP TABLE — the keyword is parsed but
+    // has no effect. We omit it to keep the statement portable.
+    await this.runQuery(
+      c,
+      `DROP TABLE IF EXISTS ${ident(schema)}.${ident(name)}`,
+    );
+  },
+
+  async dropSchema(c, name) {
+    await this.runQuery(c, `DROP DATABASE IF EXISTS ${ident(name)}`);
+  },
+
+  async truncateTable(c, schema, name) {
+    await this.runQuery(
+      c,
+      `TRUNCATE TABLE ${ident(schema)}.${ident(name)}`,
+    );
+  },
 };
 
 function buildMysqlCreateTable(

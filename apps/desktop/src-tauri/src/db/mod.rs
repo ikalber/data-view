@@ -5,8 +5,8 @@ pub mod mssql;
 use crate::error::{AppError, AppResult};
 use crate::model::{
     ConnectionOverview, CreateSchemaOptions, CreateTableColumn, CreateTableOptions, DriverKind,
-    PageOptions, QueryResult, RelationInfo, ResolvedConnection, SchemaInfo, TableDetails,
-    TestConnectionResult,
+    DropOptions, PageOptions, QueryResult, RelationInfo, ResolvedConnection, SchemaInfo,
+    TableDetails, TestConnectionResult,
 };
 
 pub async fn test(conn: &ResolvedConnection) -> AppResult<TestConnectionResult> {
@@ -178,6 +178,72 @@ fn build_create_table_sql(
         ident_fn(name),
         col_lines.join(",\n")
     ))
+}
+
+pub async fn drop_table(
+    conn: &ResolvedConnection,
+    schema: &str,
+    name: &str,
+    options: &DropOptions,
+) -> AppResult<()> {
+    let (idfn, cascade_supported): (fn(&str) -> String, bool) = match conn.driver {
+        DriverKind::Postgres => (pg_ident, true),
+        DriverKind::Mysql => (my_ident, false),
+        DriverKind::Mssql => (ms_ident, false),
+    };
+    let tail = if options.cascade && cascade_supported {
+        " CASCADE"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "DROP TABLE IF EXISTS {}.{}{}",
+        idfn(schema),
+        idfn(name),
+        tail
+    );
+    run_query(conn, &sql).await.map(|_| ())
+}
+
+pub async fn drop_schema(
+    conn: &ResolvedConnection,
+    name: &str,
+    options: &DropOptions,
+) -> AppResult<()> {
+    let sql = match conn.driver {
+        DriverKind::Postgres => {
+            let tail = if options.cascade { " CASCADE" } else { "" };
+            format!("DROP SCHEMA IF EXISTS {}{}", pg_ident(name), tail)
+        }
+        DriverKind::Mysql => format!("DROP DATABASE IF EXISTS {}", my_ident(name)),
+        DriverKind::Mssql => format!("DROP SCHEMA IF EXISTS {}", ms_ident(name)),
+    };
+    run_query(conn, &sql).await.map(|_| ())
+}
+
+pub async fn truncate_table(
+    conn: &ResolvedConnection,
+    schema: &str,
+    name: &str,
+    options: &DropOptions,
+) -> AppResult<()> {
+    let (idfn, cascade_supported): (fn(&str) -> String, bool) = match conn.driver {
+        DriverKind::Postgres => (pg_ident, true),
+        DriverKind::Mysql => (my_ident, false),
+        DriverKind::Mssql => (ms_ident, false),
+    };
+    let tail = if options.cascade && cascade_supported {
+        " CASCADE"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "TRUNCATE TABLE {}.{}{}",
+        idfn(schema),
+        idfn(name),
+        tail
+    );
+    run_query(conn, &sql).await.map(|_| ())
 }
 
 fn pg_ident(name: &str) -> String {

@@ -16,6 +16,7 @@ import type {
 } from "@data-view/core";
 import type { TabGroup } from "./workspace-tab";
 import { useTransport } from "../transport-context";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ConnectionForm } from "./ConnectionForm";
 import { ConnectionOverviewPane } from "./ConnectionOverviewPane";
 import { CreateDatabaseModal } from "./CreateDatabaseModal";
@@ -146,6 +147,12 @@ export function AppShell({
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
   const [showCreateDb, setShowCreateDb] = useState(false);
   const [showCreateTable, setShowCreateTable] = useState<string | null>(null);
+  const [dropDbName, setDropDbName] = useState<string | null>(null);
+  const [dropDbCascade, setDropDbCascade] = useState(false);
+  const [dropTableTarget, setDropTableTarget] = useState<
+    { schema: string; name: string } | null
+  >(null);
+  const [dropTableCascade, setDropTableCascade] = useState(false);
   /** Bumped whenever a schema/table is created so the Sidebar's effects
    * re-fetch schemas/relations without us having to plumb a callback through
    * its internals. The Sidebar keys its useEffect deps on `connectionId` and
@@ -915,6 +922,13 @@ export function AppShell({
             schema={tab.schema}
             name={tab.name}
             onOpenInSqlEditor={(sql) => openSql(sql)}
+            onAfterDrop={() => {
+              setSidebarRefreshToken((n) => n + 1);
+              closeTab(tab.id);
+            }}
+            onAfterTruncate={() =>
+              setSidebarRefreshToken((n) => n + 1)
+            }
           />
         );
       case "schema":
@@ -1002,6 +1016,22 @@ export function AppShell({
           onCreateTable={
             active
               ? (schema) => setShowCreateTable(schema ?? activeSchema ?? null)
+              : undefined
+          }
+          onDropDatabase={
+            active
+              ? (name) => {
+                  setDropDbCascade(false);
+                  setDropDbName(name);
+                }
+              : undefined
+          }
+          onDropTable={
+            active
+              ? (schemaName, name) => {
+                  setDropTableCascade(false);
+                  setDropTableTarget({ schema: schemaName, name });
+                }
               : undefined
           }
           refreshToken={sidebarRefreshToken}
@@ -1099,6 +1129,90 @@ export function AppShell({
             setSidebarRefreshToken((n) => n + 1);
             setActiveSchema(schema);
             openTable(schema, name, { preview: false });
+          }}
+        />
+      )}
+      {dropDbName && active && (
+        <ConfirmDialog
+          title={`DROP ${active.driver === "mysql" ? "DATABASE" : "SCHEMA"} ${dropDbName}`}
+          message={
+            <>
+              Esto borra <strong>todo el contenido</strong> de{" "}
+              <code>{dropDbName}</code>. La acción no se puede deshacer.
+            </>
+          }
+          confirmText={dropDbName}
+          confirmLabel={`DROP ${active.driver === "mysql" ? "database" : "schema"}`}
+          destructive
+          toggle={
+            active.driver === "postgres"
+              ? {
+                  label: "CASCADE",
+                  checked: dropDbCascade,
+                  onChange: setDropDbCascade,
+                  hint: "Borra también todo objeto que dependa de este schema.",
+                }
+              : undefined
+          }
+          onCancel={() => {
+            setDropDbName(null);
+            setDropDbCascade(false);
+          }}
+          onConfirm={async () => {
+            await transport.dropSchema(active.id, dropDbName, {
+              cascade: dropDbCascade,
+            });
+            // If the dropped schema is the one currently selected, clear it
+            // so the workspace doesn't try to load tables from a dead schema.
+            if (activeSchema === dropDbName) setActiveSchema(null);
+            setDropDbName(null);
+            setDropDbCascade(false);
+            setSidebarRefreshToken((n) => n + 1);
+          }}
+        />
+      )}
+      {dropTableTarget && active && (
+        <ConfirmDialog
+          title={`DROP TABLE ${dropTableTarget.schema}.${dropTableTarget.name}`}
+          message={
+            <>
+              Esto borra <strong>la tabla y todos sus datos</strong>. La acción
+              no se puede deshacer.
+            </>
+          }
+          confirmText={dropTableTarget.name}
+          confirmLabel="DROP table"
+          destructive
+          toggle={
+            active.driver === "postgres"
+              ? {
+                  label: "CASCADE",
+                  checked: dropTableCascade,
+                  onChange: setDropTableCascade,
+                  hint: "Borra también views/FKs que dependan de esta tabla.",
+                }
+              : undefined
+          }
+          onCancel={() => {
+            setDropTableTarget(null);
+            setDropTableCascade(false);
+          }}
+          onConfirm={async () => {
+            const target = dropTableTarget;
+            await transport.dropTable(active.id, target.schema, target.name, {
+              cascade: dropTableCascade,
+            });
+            // Close the corresponding tab if it's open.
+            const open = tabs.find(
+              (t) =>
+                t.kind === "table" &&
+                t.schema === target.schema &&
+                t.name === target.name,
+            );
+            if (open) closeTab(open.id);
+            setDropTableTarget(null);
+            setDropTableCascade(false);
+            setSidebarRefreshToken((n) => n + 1);
           }}
         />
       )}

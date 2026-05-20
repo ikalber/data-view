@@ -97,6 +97,36 @@ export interface Transport {
     connectionId: string,
     options: CreateTableOptions,
   ): Promise<void>;
+
+  /** Drop a table. `cascade` only honored by Postgres. */
+  dropTable(
+    connectionId: string,
+    schema: string,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
+
+  /** Drop a schema (PG/MSSQL) or database (MySQL). `cascade` PG-only. */
+  dropSchema(
+    connectionId: string,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
+
+  /** Empty a table preserving its structure. `cascade` PG-only. */
+  truncateTable(
+    connectionId: string,
+    schema: string,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
+}
+
+export interface DropOptions {
+  /** Postgres: include CASCADE in the statement so dependents (views, FKs)
+   * are dropped/truncated too. Ignored on MySQL and SQL Server, which don't
+   * accept CASCADE on DROP TABLE / TRUNCATE. */
+  cascade?: boolean;
 }
 
 export interface CreateSchemaOptions {

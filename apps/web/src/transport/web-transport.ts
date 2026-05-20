@@ -4,6 +4,7 @@ import type {
   ConnectionOverview,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
   ExportTableOptions,
@@ -119,6 +120,35 @@ export const webTransport: Transport = {
     http<{ ok: true }>(`/api/connections/${connectionId}/tables`, {
       method: "POST",
       body: JSON.stringify(options),
+    }) as unknown as Promise<void>,
+  dropTable: (connectionId, schema, name, options?: DropOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/ddl`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "drop-table",
+        schema,
+        name,
+        cascade: options?.cascade,
+      }),
+    }) as unknown as Promise<void>,
+  dropSchema: (connectionId, name, options?: DropOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/ddl`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "drop-schema",
+        name,
+        cascade: options?.cascade,
+      }),
+    }) as unknown as Promise<void>,
+  truncateTable: (connectionId, schema, name, options?: DropOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/ddl`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "truncate-table",
+        schema,
+        name,
+        cascade: options?.cascade,
+      }),
     }) as unknown as Promise<void>,
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const meta = await downloadExport(

@@ -19,6 +19,12 @@ import type {
   QueryResult,
   TableDetails,
 } from "@data-view/core";
+import {
+  generateDeleteSql,
+  generateInsertSql,
+  generateSelectSql,
+  generateUpdateSql,
+} from "@data-view/core";
 import { useTransport } from "../transport-context";
 import {
   EditableDataGrid,
@@ -31,6 +37,7 @@ import {
 } from "./EditableDataGrid";
 import { StructureEditor } from "./StructureEditor";
 import { ExportMenu } from "./ExportMenu";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface Props {
   connectionId: string;
@@ -38,6 +45,13 @@ interface Props {
   schema: string;
   name: string;
   onOpenInSqlEditor: (sql: string) => void;
+  /** Called after a successful DROP TABLE so the parent can close this tab
+   * and refresh the sidebar's relation list. Optional — when omitted, the
+   * pane stays mounted (data will fail to reload). */
+  onAfterDrop?: () => void;
+  /** Called after a successful TRUNCATE so the parent can refresh the
+   * sidebar counters; the pane itself reloads automatically. */
+  onAfterTruncate?: () => void;
 }
 
 type Tab = "data" | "structure" | "indexes";
@@ -169,9 +183,16 @@ export function TablePane({
   schema,
   name,
   onOpenInSqlEditor,
+  onAfterDrop,
+  onAfterTruncate,
 }: Props) {
   const transport = useTransport();
   const [tab, setTab] = useState<Tab>("data");
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [confirmKind, setConfirmKind] =
+    useState<"drop" | "truncate" | null>(null);
+  const [cascade, setCascade] = useState(false);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const [data, setData] = useState<QueryResult | null>(null);
   const [details, setDetails] = useState<TableDetails | null>(null);
   const [detailsNonce, setDetailsNonce] = useState(0);
@@ -376,6 +397,75 @@ export function TablePane({
     setDetails(null);
     setDetailsNonce((n) => n + 1);
   }
+
+  const genColumns = useMemo(
+    () =>
+      details?.columns.map((c) => ({
+        name: c.name,
+        dataType: c.dataType,
+        nullable: c.nullable,
+        isPrimaryKey: c.isPrimaryKey,
+      })) ?? [],
+    [details],
+  );
+
+  function generate(kind: "select" | "insert" | "update" | "delete") {
+    setActionsOpen(false);
+    let text: string;
+    switch (kind) {
+      case "select":
+        text = generateSelectSql(driver, schema, name, genColumns);
+        break;
+      case "insert":
+        text = generateInsertSql(driver, schema, name, genColumns);
+        break;
+      case "update":
+        text = generateUpdateSql(driver, schema, name, genColumns);
+        break;
+      case "delete":
+        text = generateDeleteSql(driver, schema, name, genColumns);
+        break;
+    }
+    onOpenInSqlEditor(text);
+  }
+
+  async function doDropTable() {
+    await transport.dropTable(connectionId, schema, name, { cascade });
+    onAfterDrop?.();
+  }
+
+  async function doTruncateTable() {
+    await transport.truncateTable(connectionId, schema, name, { cascade });
+    setConfirmKind(null);
+    setCascade(false);
+    onAfterTruncate?.();
+    // Reload the data view so the empty result is visible.
+    refreshDetails();
+    setData(null);
+    requestIdRef.current += 1;
+  }
+
+  // Close the actions menu on outside click / Escape.
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (
+        actionsMenuRef.current &&
+        !actionsMenuRef.current.contains(e.target as Node)
+      ) {
+        setActionsOpen(false);
+      }
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setActionsOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [actionsOpen]);
 
   // Initial + subsequent loads when applied WHERE or sort changes.
   useEffect(() => {
@@ -722,8 +812,146 @@ export function TablePane({
           >
             Abrir en SQL editor
           </button>
+          <div
+            ref={actionsMenuRef}
+            style={{ position: "relative", display: "inline-block" }}
+          >
+            <button
+              type="button"
+              className="dv-button"
+              onClick={() => setActionsOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={actionsOpen}
+              disabled={!details}
+              title={
+                details ? "Acciones sobre esta tabla" : "Esperando metadata…"
+              }
+            >
+              Acciones <span style={{ marginLeft: 4 }}>▾</span>
+            </button>
+            {actionsOpen && details && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  right: 0,
+                  zIndex: 30,
+                  minWidth: 220,
+                  background: "var(--dv-panel)",
+                  border: "1px solid var(--dv-border)",
+                  borderRadius: 6,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+                  padding: 4,
+                  fontSize: 13,
+                }}
+              >
+                <ActionItem
+                  label="Generar SELECT"
+                  onClick={() => generate("select")}
+                />
+                <ActionItem
+                  label="Generar INSERT"
+                  onClick={() => generate("insert")}
+                />
+                <ActionItem
+                  label="Generar UPDATE"
+                  onClick={() => generate("update")}
+                />
+                <ActionItem
+                  label="Generar DELETE"
+                  onClick={() => generate("delete")}
+                />
+                <div
+                  style={{
+                    height: 1,
+                    background: "var(--dv-border)",
+                    margin: "4px 0",
+                  }}
+                />
+                <ActionItem
+                  label="TRUNCATE table…"
+                  destructive
+                  onClick={() => {
+                    setActionsOpen(false);
+                    setCascade(false);
+                    setConfirmKind("truncate");
+                  }}
+                />
+                <ActionItem
+                  label="DROP table…"
+                  destructive
+                  onClick={() => {
+                    setActionsOpen(false);
+                    setCascade(false);
+                    setConfirmKind("drop");
+                  }}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {confirmKind === "drop" && (
+        <ConfirmDialog
+          title={`DROP TABLE ${schema}.${name}`}
+          message={
+            <>
+              Esto borra <strong>la tabla y todos sus datos</strong>. La acción
+              no se puede deshacer.
+            </>
+          }
+          confirmText={name}
+          confirmLabel="DROP table"
+          destructive
+          toggle={
+            driver === "postgres"
+              ? {
+                  label: "CASCADE",
+                  checked: cascade,
+                  onChange: setCascade,
+                  hint: "Borra también views/FKs que dependan de esta tabla.",
+                }
+              : undefined
+          }
+          onCancel={() => {
+            setConfirmKind(null);
+            setCascade(false);
+          }}
+          onConfirm={doDropTable}
+        />
+      )}
+
+      {confirmKind === "truncate" && (
+        <ConfirmDialog
+          title={`TRUNCATE ${schema}.${name}`}
+          message={
+            <>
+              Esto borra <strong>todas las filas</strong> manteniendo la
+              estructura. La acción no se puede deshacer.
+            </>
+          }
+          confirmText={name}
+          confirmLabel="TRUNCATE table"
+          destructive
+          toggle={
+            driver === "postgres"
+              ? {
+                  label: "CASCADE",
+                  checked: cascade,
+                  onChange: setCascade,
+                  hint: "Truncar también las tablas referenciadas por FK.",
+                }
+              : undefined
+          }
+          onCancel={() => {
+            setConfirmKind(null);
+            setCascade(false);
+          }}
+          onConfirm={doTruncateTable}
+        />
+      )}
 
       {exportStatus && (
         <div
@@ -1016,6 +1244,44 @@ function IndexesTab({
         </table>
       </div>
     </div>
+  );
+}
+
+interface ActionItemProps {
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+}
+
+function ActionItem({ label, onClick, destructive }: ActionItemProps) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
+        padding: "6px 10px",
+        background: "transparent",
+        border: "none",
+        borderRadius: 4,
+        cursor: "pointer",
+        color: destructive ? "var(--dv-tone-danger-fg)" : "var(--dv-text)",
+        fontSize: 13,
+        fontFamily: "inherit",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background =
+          "var(--dv-panel-2)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

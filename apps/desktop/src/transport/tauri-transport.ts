@@ -6,6 +6,7 @@ import type {
   ConnectionOverview,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
   ExportFormat,
@@ -82,6 +83,12 @@ export const tauriTransport: Transport = {
     call<void>("create_schema", { connectionId, options }),
   createTable: (connectionId, options: CreateTableOptions) =>
     call<void>("create_table", { connectionId, options }),
+  dropTable: (connectionId, schema, name, options?: DropOptions) =>
+    call<void>("drop_table", { connectionId, schema, name, options }),
+  dropSchema: (connectionId, name, options?: DropOptions) =>
+    call<void>("drop_schema", { connectionId, name, options }),
+  truncateTable: (connectionId, schema, name, options?: DropOptions) =>
+    call<void>("truncate_table", { connectionId, schema, name, options }),
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const targetPath = await pickSaveLocation("database", "sql");
     if (!targetPath) throw new ExportCancelled();

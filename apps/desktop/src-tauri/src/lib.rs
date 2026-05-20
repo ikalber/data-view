@@ -36,6 +36,9 @@ pub fn run() {
             commands::export_database,
             commands::create_schema,
             commands::create_table,
+            commands::drop_table,
+            commands::drop_schema,
+            commands::truncate_table,
             commands::read_text_file,
         ])
         .run(tauri::generate_context!())

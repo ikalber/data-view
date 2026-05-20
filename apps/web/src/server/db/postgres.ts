@@ -395,6 +395,27 @@ export const postgresDriver: DriverAdapter = {
     );
     await this.runQuery(c, sqlText);
   },
+
+  async dropTable(c, schema, name, options) {
+    const tail = options?.cascade ? " CASCADE" : "";
+    await this.runQuery(
+      c,
+      `DROP TABLE IF EXISTS ${ident(schema)}.${ident(name)}${tail}`,
+    );
+  },
+
+  async dropSchema(c, name, options) {
+    const tail = options?.cascade ? " CASCADE" : "";
+    await this.runQuery(c, `DROP SCHEMA IF EXISTS ${ident(name)}${tail}`);
+  },
+
+  async truncateTable(c, schema, name, options) {
+    const tail = options?.cascade ? " CASCADE" : "";
+    await this.runQuery(
+      c,
+      `TRUNCATE TABLE ${ident(schema)}.${ident(name)}${tail}`,
+    );
+  },
 };
 
 function buildPostgresCreateTable(

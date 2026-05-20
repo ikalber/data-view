@@ -4,6 +4,7 @@ import type {
   ConnectionOverview,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropOptions,
   PageOptions,
   QueryResult,
   QueryResultColumn,
@@ -78,4 +79,21 @@ export interface DriverAdapter {
 
   createSchema(conn: ResolvedConnection, options: CreateSchemaOptions): Promise<void>;
   createTable(conn: ResolvedConnection, options: CreateTableOptions): Promise<void>;
+  dropTable(
+    conn: ResolvedConnection,
+    schema: string,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
+  dropSchema(
+    conn: ResolvedConnection,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
+  truncateTable(
+    conn: ResolvedConnection,
+    schema: string,
+    name: string,
+    options?: DropOptions,
+  ): Promise<void>;
 }
