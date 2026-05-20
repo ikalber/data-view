@@ -15,10 +15,62 @@ Visor de bases de datos al estilo Beekeeper Studio. Un solo monorepo, dos target
 - **`apps/desktop`** — Tauri v2 + Rust. Genera un `.msi` / `.exe` para Windows (también `.dmg` para macOS y `.deb`/`.AppImage` para Linux). Login opcional; las conexiones se guardan en el directorio de configuración del usuario.
 
 Ambas comparten:
-- **`packages/core`** — tipos TS y la interfaz `Transport` (la abstracción que hace que la UI no sepa si está hablando con un endpoint HTTP o con un comando Tauri).
-- **`packages/ui`** — componentes React (lista de conexiones, árbol de schemas/tablas, editor SQL, tabla de resultados).
+- **`packages/core`** — tipos TS, interfaz `Transport`, helpers SQL (`generateSelectSql` / `generateInsertSql` / `generateUpdateSql` / `generateDeleteSql` / `generateFullTableDDL`, `renderForeignKeyClause`, `quoteIdent` por dialecto).
+- **`packages/ui`** — componentes React: lista de conexiones, sidebar con tree, editor SQL con CodeMirror, grilla editable, modales (Create database/table, Cell viewer, Confirm dialog, Context menu), `AppShell` que orquesta todo.
 
 Bases de datos soportadas en esta versión: **PostgreSQL · MySQL/MariaDB · SQL Server**.
+
+---
+
+## Features
+
+### Editor SQL
+- **CodeMirror 6** con syntax highlighting por dialecto (`PostgreSQL` / `MySQL` / `MSSQL` / `StandardSQL`).
+- **Autocomplete** de keywords + nombres de schemas/databases + tablas del database activo (fetch lazy).
+- **Run selection** — si hay texto seleccionado, `Ctrl/Cmd+Enter` ejecuta solo eso; si no, el buffer entero.
+- **Format SQL** con [`sql-formatter`](https://github.com/sql-formatter-org/sql-formatter) (keywords upper, indent 2, dialecto por driver).
+- **EXPLAIN** — prefija `EXPLAIN ` automáticamente (`SET SHOWPLAN_TEXT ON` en SQL Server) y muestra el plan en la grilla.
+- Hotkeys: `Ctrl/Cmd+Enter` = Run, `Ctrl/Cmd+S` = Guardar archivo.
+- Multi-cursor, fold gutter, búsqueda nativa (`Ctrl+F`), bracket matching, history (undo/redo).
+- Theme dark/light sincronizado con el `ThemeProvider`.
+
+### Browser de schemas y tablas
+- Vista por **schema activo** o **árbol** completo del connection.
+- Vista **global** que muestra todos los connections con sus schemas/tablas anidadas.
+- **Búsqueda dentro del tree** — input que filtra schemas y tablas en los schemas ya cargados.
+- **Clic derecho** sobre tablas y schemas abre un menú contextual:
+  - Tabla: Abrir · Generar CREATE TABLE / SELECT / INSERT / UPDATE / DELETE · TRUNCATE · DROP
+  - Schema: Crear tabla acá · DROP schema/database
+
+### DDL completo
+- **Crear schema/database** con form (charset/collation MySQL, owner Postgres).
+- **Crear tabla** con editor visual:
+  - Selector de tipos por driver (`serial`, `INT AUTO_INCREMENT`, `nvarchar(n)`, `decimal(p,s)`…) con inputs para parámetros (length, precision, scale).
+  - Soporte de **ENUM** con editor de chips — en MySQL emite `ENUM(...)`, en Postgres/MSSQL convierte a `CHECK (col IN (...))`.
+  - Sección avanzada para **foreign keys** (multi-columna, `ON UPDATE`/`ON DELETE`) e **índices** (UNIQUE opcional).
+- **ALTER TABLE** desde la pestaña *Structure* — agregar/borrar/renombrar columnas, cambiar tipos, defaults, NULL/NOT NULL.
+- **Gestión de índices** desde la pestaña *Indexes* — crear (UNIQUE opcional) y borrar con confirmación.
+- **DROP table/schema/database** y **TRUNCATE** con `ConfirmDialog` typed-name guard y toggle `CASCADE` (solo en Postgres).
+- **Generar DDL completo**: `CREATE TABLE` + `CREATE INDEX` + `ALTER TABLE ADD CONSTRAINT FK` listo para pegar en otro entorno.
+
+### Edición de datos
+- **Grilla editable** con doble-clic en celda, navegación con flechas/Ctrl+Flecha, paste de matrices tabuladas.
+- **Insertar filas** en blanco con `+ Agregar fila` y `Ctrl+S` para guardar.
+- **Cell viewer modal** (clic derecho en la grilla / doble-clic en results) — JSON pretty-print con tabs JSON/Texto crudo, info de blobs, copy al clipboard.
+- **Filtrar resultados** — input en el header de `ResultsTable` que filtra filas client-side.
+
+### Archivos y workspace
+- Tabs estilo VS Code: preview (single-click) vs pinned (double-click), reordenar, **grupos** colapsables con nombre.
+- **Saved SQL files** por connection — guardar, abrir, borrar.
+- **Abrir `.sql` del disco** — en desktop usa el dialog de Tauri + lectura UTF-8 (límite 16 MB); en web cae a `<input type="file">`.
+- **Export** a CSV / JSON / SQL desde cualquier resultado o tabla completa.
+- **Export database** — dump multi-schema a un único `.sql`.
+
+### Conexiones y workspace
+- Multi-conexión con **carpetas** y **tags** (con colores) para organizar.
+- Tags `system` (Test/Producción) seedeados automáticamente.
+- Modo `globalTreeView` para navegar todos los connections desde el sidebar.
+- En la web cada usuario solo ve sus propias conexiones.
 
 ---
 
@@ -140,11 +192,34 @@ pnpm build:web
 pnpm build:desktop
 ```
 
-## Roadmap corto
+## Roadmap
 
-- [ ] Edición inline de filas (UPDATE/DELETE con confirmación)
-- [ ] Soporte SSL/TLS completo en el driver Postgres del desktop
-- [ ] Master password opcional para el desktop
-- [ ] OAuth (Google/GitHub) para la web
-- [ ] Export a CSV / JSON desde la grilla
-- [ ] Historial de queries por conexión
+### Próximo (alta prioridad)
+
+- [ ] **SSH tunnel** — conectarse a DBs en redes privadas vía bastion. Hoy hay que abrir el puerto público o hacer `ssh -L` a mano. Implementación: `russh` o `ssh2` en Rust, `ssh2` en Node; el `ConnectionConfig` gana una sub-sección opcional con host/port/user/auth/key.
+- [ ] **Master password** opcional para el desktop. El módulo `crypto.rs` (AES-256-GCM + Argon2id) ya está preparado — falta la UI de unlock al startup.
+- [ ] **SSL/TLS completo** en el driver Postgres del desktop (`rustls` con verificación de certs).
+
+### Editor / UX
+
+- [ ] **Multi-statement** — split por `;` (respetando strings/comments) con tabs de resultados por sentencia.
+- [ ] **Query parameters** (`:foo` / `$1`) con panel lateral de valores.
+- [ ] **Visual EXPLAIN** — parsear el plan de Postgres y renderizarlo como árbol con costos.
+- [ ] **Command palette** (`Cmd+K`) — saltar a conexión / tabla / archivo / acción.
+- [ ] **Snippets** con placeholders preguntables al abrir.
+
+### DDL avanzado
+
+- [ ] **FKs y índices en `StructureEditor`** (hoy se manejan al crear; falta agregarlos sobre tablas existentes desde la UI — vía SQL editor sí funciona).
+- [ ] **Diff de schema** entre dos conexiones → genera el script `ALTER`.
+- [ ] Browser de **Views / Materialized Views / Stored Procedures / Triggers / Functions**.
+
+### Datos
+
+- [ ] **Import CSV/JSON** → tabla nueva o existente (cierra el roundtrip con `Export database`).
+- [ ] **Restore** — botón explícito para correr un `.sql` de backup (hoy se hace con `Abrir .sql` + `Run`).
+
+### Auth y web
+
+- [ ] OAuth (Google/GitHub) para la web.
+- [ ] Roles/permisos: ver grants, hacer `GRANT/REVOKE` con UI.
