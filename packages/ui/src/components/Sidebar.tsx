@@ -11,6 +11,7 @@ import type {
   Tag,
 } from "@data-view/core";
 import { useTransport } from "../transport-context";
+import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type { WorkspaceTab, WorkspaceTabKind } from "./workspace-tab";
 
 type Mode = "select" | "tree";
@@ -70,6 +71,15 @@ interface Props {
   onDropDatabase?: (name: string) => void;
   /** Trigger DROP TABLE on the given schema.name. */
   onDropTable?: (schema: string, name: string) => void;
+  /** Trigger TRUNCATE on the given table (parent handles confirmation). */
+  onTruncateTable?: (schema: string, name: string) => void;
+  /** Generate a SELECT/INSERT/UPDATE/DELETE skeleton, or the full CREATE
+   * TABLE DDL, and seed it into the SQL editor. */
+  onGenerateSql?: (
+    schema: string,
+    name: string,
+    kind: "select" | "insert" | "update" | "delete" | "ddl",
+  ) => void;
   /** Bumped by the parent after a create-schema/create-table action so the
    * sidebar refetches schemas and relations without losing local state. */
   refreshToken?: number;
@@ -121,6 +131,8 @@ export function Sidebar({
   onCreateTable,
   onDropDatabase,
   onDropTable,
+  onTruncateTable,
+  onGenerateSql,
   refreshToken = 0,
 }: Props) {
   const transport = useTransport();
@@ -140,6 +152,121 @@ export function Sidebar({
   const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
   const [treeSearch, setTreeSearch] = useState("");
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  // Right-click context menu state. `target` describes what was clicked so we
+  // can build the appropriate item list at render time.
+  type ContextTarget =
+    | { kind: "table"; schema: string; name: string; isSystem?: boolean }
+    | { kind: "schema"; schema: string; isSystem: boolean };
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    target: ContextTarget;
+  } | null>(null);
+
+  function openTableMenu(
+    e: React.MouseEvent,
+    schema: string,
+    name: string,
+  ) {
+    if (!onDropTable && !onTruncateTable && !onGenerateSql) return;
+    e.preventDefault();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { kind: "table", schema, name },
+    });
+  }
+
+  function openSchemaMenu(
+    e: React.MouseEvent,
+    schemaName: string,
+    isSystem: boolean,
+  ) {
+    if (isSystem && !onCreateTable) return;
+    if (!onDropDatabase && !onCreateTable) return;
+    e.preventDefault();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { kind: "schema", schema: schemaName, isSystem },
+    });
+  }
+
+  function buildContextItems(target: ContextTarget): ContextMenuItem[] {
+    if (target.kind === "table") {
+      const items: ContextMenuItem[] = [
+        {
+          label: "Abrir",
+          onClick: () => onOpenTable(target.schema, target.name),
+        },
+      ];
+      if (onGenerateSql) {
+        items.push(
+          { separator: true },
+          {
+            label: "Generar CREATE TABLE",
+            onClick: () => onGenerateSql(target.schema, target.name, "ddl"),
+          },
+          {
+            label: "Generar SELECT",
+            onClick: () =>
+              onGenerateSql(target.schema, target.name, "select"),
+          },
+          {
+            label: "Generar INSERT",
+            onClick: () =>
+              onGenerateSql(target.schema, target.name, "insert"),
+          },
+          {
+            label: "Generar UPDATE",
+            onClick: () =>
+              onGenerateSql(target.schema, target.name, "update"),
+          },
+          {
+            label: "Generar DELETE",
+            onClick: () =>
+              onGenerateSql(target.schema, target.name, "delete"),
+          },
+        );
+      }
+      if (onTruncateTable || onDropTable) {
+        items.push({ separator: true });
+        if (onTruncateTable) {
+          items.push({
+            label: "TRUNCATE table…",
+            destructive: true,
+            onClick: () => onTruncateTable(target.schema, target.name),
+          });
+        }
+        if (onDropTable) {
+          items.push({
+            label: "DROP table…",
+            destructive: true,
+            onClick: () => onDropTable(target.schema, target.name),
+          });
+        }
+      }
+      return items;
+    }
+    // Schema
+    const items: ContextMenuItem[] = [];
+    if (onCreateTable && !target.isSystem) {
+      items.push({
+        label: "Crear tabla acá…",
+        onClick: () => onCreateTable(target.schema),
+      });
+    }
+    if (onDropDatabase && !target.isSystem) {
+      if (items.length > 0) items.push({ separator: true });
+      items.push({
+        label: `DROP ${driver === "mysql" ? "database" : "schema"}…`,
+        destructive: true,
+        onClick: () => onDropDatabase(target.schema),
+      });
+    }
+    return items;
+  }
 
   // ── Global tree state (caches survive across renders while the toggle is on)
   const [globalExpandedConns, setGlobalExpandedConns] = useState<Set<string>>(
@@ -786,16 +913,12 @@ export function Sidebar({
                   onDoubleClick={() =>
                     onOpenTable(r.schema, r.name, { preview: false })
                   }
-                  onContextMenu={(e) => {
-                    if (!onDropTable) return;
-                    e.preventDefault();
-                    onDropTable(r.schema, r.name);
-                  }}
+                  onContextMenu={(e) => openTableMenu(e, r.schema, r.name)}
                   title={`${r.schema}.${r.name}${
                     r.approxRowCount != null
                       ? ` · ${r.approxRowCount.toLocaleString()} filas`
                       : ""
-                  }${onDropTable ? " — clic derecho para DROP" : ""}`}
+                  } — clic derecho para acciones`}
                 >
                   <span className="dv-table-row-icon">
                     {r.kind === "view"
@@ -914,14 +1037,11 @@ export function Sidebar({
                     onChangeSchema(s.name);
                     onOpenDatabase(s.name, { preview: false });
                   }}
-                  onContextMenu={(e) => {
-                    if (s.isSystem || !onDropDatabase) return;
-                    e.preventDefault();
-                    onDropDatabase(s.name);
-                  }}
+                  onContextMenu={(e) => openSchemaMenu(e, s.name, s.isSystem)}
                   title={
-                    !s.isSystem && onDropDatabase
-                      ? "Clic derecho para DROP"
+                    !s.isSystem &&
+                    (onDropDatabase || onCreateTable)
+                      ? "Clic derecho para acciones"
                       : undefined
                   }
                 >
@@ -987,16 +1107,12 @@ export function Sidebar({
                           onDoubleClick={() =>
                             onOpenTable(r.schema, r.name, { preview: false })
                           }
-                          onContextMenu={(e) => {
-                            if (!onDropTable) return;
-                            e.preventDefault();
-                            onDropTable(r.schema, r.name);
-                          }}
+                          onContextMenu={(e) => openTableMenu(e, r.schema, r.name)}
                           title={`${r.schema}.${r.name}${
                             r.approxRowCount != null
                               ? ` · ${r.approxRowCount.toLocaleString()} filas`
                               : ""
-                          }${onDropTable ? " — clic derecho para DROP" : ""}`}
+                          } — clic derecho para acciones`}
                         >
                           <span className="dv-table-row-icon">
                             {r.kind === "view"
@@ -1034,6 +1150,14 @@ export function Sidebar({
         </span>
         <span>v0.1.9</span>
       </div>
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={buildContextItems(contextMenu.target)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </aside>
   );
 }

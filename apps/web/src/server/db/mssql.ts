@@ -262,6 +262,55 @@ export const mssqlDriver: DriverAdapter = {
         }
         entry.columns.push(row.column_name);
       }
+      // Foreign keys via sys.foreign_keys. STRING_AGG requires SQL Server
+      // 2017+ — the queries above also use modern syntax, so we don't bother
+      // with a backwards-compat fallback for older servers.
+      const fks = await pool
+        .request()
+        .input("schema", sql.NVarChar, schema)
+        .input("name", sql.NVarChar, name)
+        .query<{
+          name: string;
+          local_cols: string;
+          ref_schema: string;
+          ref_table: string;
+          ref_cols: string;
+          on_update: string;
+          on_delete: string;
+        }>(
+          `SELECT
+             fk.name AS name,
+             STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS local_cols,
+             ref_s.name AS ref_schema,
+             ref_t.name AS ref_table,
+             STRING_AGG(ref_c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_cols,
+             fk.update_referential_action_desc AS on_update,
+             fk.delete_referential_action_desc AS on_delete
+           FROM sys.foreign_keys fk
+           JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+           JOIN sys.columns c ON c.object_id = fk.parent_object_id AND c.column_id = fkc.parent_column_id
+           JOIN sys.columns ref_c ON ref_c.object_id = fk.referenced_object_id AND ref_c.column_id = fkc.referenced_column_id
+           JOIN sys.tables ref_t ON ref_t.object_id = fk.referenced_object_id
+           JOIN sys.schemas ref_s ON ref_s.schema_id = ref_t.schema_id
+           JOIN sys.tables tab ON tab.object_id = fk.parent_object_id
+           JOIN sys.schemas sch ON sch.schema_id = tab.schema_id
+           WHERE sch.name = @schema AND tab.name = @name
+           GROUP BY fk.name, ref_s.name, ref_t.name,
+                    fk.update_referential_action_desc,
+                    fk.delete_referential_action_desc
+           ORDER BY fk.name`,
+        );
+      const foreignKeys = fks.recordset.map((row) => ({
+        name: row.name,
+        columns: row.local_cols.split(","),
+        referencedSchema: row.ref_schema,
+        referencedTable: row.ref_table,
+        referencedColumns: row.ref_cols.split(","),
+        // sys.foreign_keys gives names like "NO_ACTION" — convert to the SQL
+        // form ("NO ACTION") so the generated DDL is valid as-is.
+        onUpdate: row.on_update?.replace("_", " ") || undefined,
+        onDelete: row.on_delete?.replace("_", " ") || undefined,
+      }));
       return {
         schema,
         name,
@@ -279,7 +328,7 @@ export const mssqlDriver: DriverAdapter = {
           if (a.unique !== b.unique) return a.unique ? -1 : 1;
           return a.name.localeCompare(b.name);
         }),
-        foreignKeys: [],
+        foreignKeys,
       };
     });
   },

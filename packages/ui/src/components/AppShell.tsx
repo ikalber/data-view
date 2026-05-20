@@ -14,6 +14,13 @@ import type {
   SchemaInfo,
   Tag,
 } from "@data-view/core";
+import {
+  generateDeleteSql,
+  generateFullTableDDL,
+  generateInsertSql,
+  generateSelectSql,
+  generateUpdateSql,
+} from "@data-view/core";
 import type { TabGroup } from "./workspace-tab";
 import { useTransport } from "../transport-context";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -153,6 +160,10 @@ export function AppShell({
     { schema: string; name: string } | null
   >(null);
   const [dropTableCascade, setDropTableCascade] = useState(false);
+  const [truncateTarget, setTruncateTarget] = useState<
+    { schema: string; name: string } | null
+  >(null);
+  const [truncateCascade, setTruncateCascade] = useState(false);
   /** Bumped whenever a schema/table is created so the Sidebar's effects
    * re-fetch schemas/relations without us having to plumb a callback through
    * its internals. The Sidebar keys its useEffect deps on `connectionId` and
@@ -647,6 +658,54 @@ export function AppShell({
     [openTab],
   );
 
+  // Fetches the table's column metadata and opens a SQL editor tab seeded
+  // with the requested DML skeleton. Right-click → Generar X in the sidebar
+  // routes through here.
+  const generateSqlFor = useCallback(
+    async (
+      connId: string,
+      schema: string,
+      name: string,
+      kind: "select" | "insert" | "update" | "delete" | "ddl",
+    ) => {
+      try {
+        const details = await transport.describeTable(connId, schema, name);
+        const cols = details.columns.map((c) => ({
+          name: c.name,
+          dataType: c.dataType,
+          nullable: c.nullable,
+          isPrimaryKey: c.isPrimaryKey,
+        }));
+        const driver = connections.find((c) => c.id === connId)?.driver ?? null;
+        let text: string;
+        switch (kind) {
+          case "select":
+            text = generateSelectSql(driver, schema, name, cols);
+            break;
+          case "insert":
+            text = generateInsertSql(driver, schema, name, cols);
+            break;
+          case "update":
+            text = generateUpdateSql(driver, schema, name, cols);
+            break;
+          case "delete":
+            text = generateDeleteSql(driver, schema, name, cols);
+            break;
+          case "ddl":
+            // generateFullTableDDL needs the actual driver to quote
+            // identifiers correctly — fall back to "postgres" rules when the
+            // driver lookup fails, since they're the most permissive.
+            text = generateFullTableDDL(driver ?? "postgres", details);
+            break;
+        }
+        openSql(text, { title: `${name}.${kind}` });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [transport, connections, openSql],
+  );
+
   // When the user clicks an item in the global tree that belongs to a DIFFERENT
   // connection, we (a) switch the active connection and (b) enqueue the open
   // until the new connection's tabs have been hydrated. Otherwise the tab
@@ -1034,6 +1093,20 @@ export function AppShell({
                 }
               : undefined
           }
+          onTruncateTable={
+            active
+              ? (schemaName, name) => {
+                  setTruncateCascade(false);
+                  setTruncateTarget({ schema: schemaName, name });
+                }
+              : undefined
+          }
+          onGenerateSql={
+            active
+              ? (schemaName, name, kind) =>
+                  void generateSqlFor(active.id, schemaName, name, kind)
+              : undefined
+          }
           refreshToken={sidebarRefreshToken}
         />
         <SidebarResizer
@@ -1167,6 +1240,43 @@ export function AppShell({
             if (activeSchema === dropDbName) setActiveSchema(null);
             setDropDbName(null);
             setDropDbCascade(false);
+            setSidebarRefreshToken((n) => n + 1);
+          }}
+        />
+      )}
+      {truncateTarget && active && (
+        <ConfirmDialog
+          title={`TRUNCATE ${truncateTarget.schema}.${truncateTarget.name}`}
+          message={
+            <>
+              Esto borra <strong>todas las filas</strong> manteniendo la
+              estructura. La acción no se puede deshacer.
+            </>
+          }
+          confirmText={truncateTarget.name}
+          confirmLabel="TRUNCATE table"
+          destructive
+          toggle={
+            active.driver === "postgres"
+              ? {
+                  label: "CASCADE",
+                  checked: truncateCascade,
+                  onChange: setTruncateCascade,
+                  hint: "Truncar también las tablas referenciadas por FK.",
+                }
+              : undefined
+          }
+          onCancel={() => {
+            setTruncateTarget(null);
+            setTruncateCascade(false);
+          }}
+          onConfirm={async () => {
+            const target = truncateTarget;
+            await transport.truncateTable(active.id, target.schema, target.name, {
+              cascade: truncateCascade,
+            });
+            setTruncateTarget(null);
+            setTruncateCascade(false);
             setSidebarRefreshToken((n) => n + 1);
           }}
         />

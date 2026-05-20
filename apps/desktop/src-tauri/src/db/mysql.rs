@@ -1,8 +1,8 @@
 use crate::error::AppResult;
 use crate::model::{
-    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
-    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
-    QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, ForeignKeyInfo, IndexInfo, PageOptions,
+    QueryResult, QueryResultColumn, RelationInfo, RelationKind, ResolvedConnection, SchemaInfo,
+    TableDetails, TestConnectionResult, QUERY_LIMIT,
 };
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row, Value as MyValue};
@@ -193,6 +193,69 @@ pub async fn describe_table(
             (schema, name),
         )
         .await?;
+    // Indexes — group rows by index name.
+    let idx_rows: Vec<(String, i64, String, u32)> = conn
+        .exec(
+            "SELECT index_name, non_unique, column_name, seq_in_index
+             FROM information_schema.statistics
+             WHERE table_schema = ? AND table_name = ?
+             ORDER BY index_name, seq_in_index",
+            (schema, name),
+        )
+        .await?;
+    let mut idx_map: std::collections::BTreeMap<String, IndexInfo> =
+        std::collections::BTreeMap::new();
+    for (idx_name, non_unique, col_name, _seq) in idx_rows {
+        let entry = idx_map
+            .entry(idx_name.clone())
+            .or_insert_with(|| IndexInfo {
+                name: idx_name.clone(),
+                columns: Vec::new(),
+                unique: non_unique == 0,
+                primary: idx_name == "PRIMARY",
+            });
+        entry.columns.push(col_name);
+    }
+    let mut indexes: Vec<IndexInfo> = idx_map.into_values().collect();
+    indexes.sort_by(|a, b| {
+        b.primary
+            .cmp(&a.primary)
+            .then(b.unique.cmp(&a.unique))
+            .then(a.name.cmp(&b.name))
+    });
+    // Foreign keys — aggregate columns per constraint with GROUP_CONCAT.
+    let fk_rows: Vec<(String, String, String, String, String, String, String)> = conn
+        .exec(
+            "SELECT rc.constraint_name,
+                    GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position),
+                    rc.unique_constraint_schema,
+                    rc.referenced_table_name,
+                    GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position),
+                    rc.update_rule,
+                    rc.delete_rule
+             FROM information_schema.referential_constraints rc
+             JOIN information_schema.key_column_usage kcu
+               ON kcu.constraint_schema = rc.constraint_schema
+              AND kcu.constraint_name = rc.constraint_name
+             WHERE kcu.table_schema = ? AND kcu.table_name = ?
+             GROUP BY rc.constraint_name, rc.unique_constraint_schema,
+                      rc.referenced_table_name, rc.update_rule, rc.delete_rule
+             ORDER BY rc.constraint_name",
+            (schema, name),
+        )
+        .await?;
+    let foreign_keys: Vec<ForeignKeyInfo> = fk_rows
+        .into_iter()
+        .map(|(fkname, local, rs, rt, refc, up, del)| ForeignKeyInfo {
+            name: fkname,
+            columns: local.split(',').map(|s| s.to_string()).collect(),
+            referenced_schema: rs,
+            referenced_table: rt,
+            referenced_columns: refc.split(',').map(|s| s.to_string()).collect(),
+            on_update: if up.is_empty() { None } else { Some(up) },
+            on_delete: if del.is_empty() { None } else { Some(del) },
+        })
+        .collect();
     let _ = conn.disconnect().await;
     let columns = rows
         .into_iter()
@@ -210,8 +273,8 @@ pub async fn describe_table(
         name: name.into(),
         kind: RelationKind::Table,
         columns,
-        indexes: vec![],
-        foreign_keys: vec![],
+        indexes,
+        foreign_keys,
     })
 }
 

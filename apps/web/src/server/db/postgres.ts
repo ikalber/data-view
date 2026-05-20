@@ -288,6 +288,50 @@ export const postgresDriver: DriverAdapter = {
          ORDER BY i.indisprimary DESC, i.indisunique DESC, ic.relname`,
         [schema, name],
       );
+      // Single round-trip for FKs: unnest conkey/confkey with ordinality and
+      // resolve back to attribute names so the columns line up positionally.
+      const fks = await client.query<{
+        name: string;
+        local_cols: string[];
+        ref_schema: string;
+        ref_table: string;
+        ref_cols: string[];
+        on_update: string | null;
+        on_delete: string | null;
+      }>(
+        `SELECT
+           c.conname AS name,
+           ARRAY(
+             SELECT a.attname
+             FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+             ORDER BY k.ord
+           ) AS local_cols,
+           n2.nspname AS ref_schema,
+           c2.relname AS ref_table,
+           ARRAY(
+             SELECT a.attname
+             FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum
+             ORDER BY k.ord
+           ) AS ref_cols,
+           CASE c.confupdtype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+             WHEN 'c' THEN 'CASCADE'   WHEN 'n' THEN 'SET NULL'
+             WHEN 'd' THEN 'SET DEFAULT' END AS on_update,
+           CASE c.confdeltype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+             WHEN 'c' THEN 'CASCADE'   WHEN 'n' THEN 'SET NULL'
+             WHEN 'd' THEN 'SET DEFAULT' END AS on_delete
+         FROM pg_constraint c
+         JOIN pg_class cls ON cls.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = cls.relnamespace
+         JOIN pg_class c2 ON c2.oid = c.confrelid
+         JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+         WHERE c.contype = 'f' AND n.nspname = $1 AND cls.relname = $2
+         ORDER BY c.conname`,
+        [schema, name],
+      );
       return {
         schema,
         name,
@@ -306,7 +350,15 @@ export const postgresDriver: DriverAdapter = {
           unique: row.is_unique,
           primary: row.is_primary,
         })),
-        foreignKeys: [],
+        foreignKeys: fks.rows.map((row) => ({
+          name: row.name,
+          columns: row.local_cols,
+          referencedSchema: row.ref_schema,
+          referencedTable: row.ref_table,
+          referencedColumns: row.ref_cols,
+          onUpdate: row.on_update ?? undefined,
+          onDelete: row.on_delete ?? undefined,
+        })),
       };
     });
   },

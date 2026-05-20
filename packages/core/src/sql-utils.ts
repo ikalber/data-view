@@ -1,4 +1,4 @@
-import type { DatabaseDriver } from "./types";
+import type { DatabaseDriver, TableDetails } from "./types";
 
 /** Quote an identifier per the active driver's rules. */
 export function quoteIdent(
@@ -79,6 +79,110 @@ export function renderForeignKeyClause(
  * (Postgres' default identifier limit is 63). */
 export function autoIndexName(table: string, columns: string[]): string {
   return `idx_${table}_${columns.join("_")}`.slice(0, 60);
+}
+
+/** Render the column-level part of a CREATE TABLE clause for one column.
+ * The MSSQL dialect is explicit about NULL/NOT NULL on every column; PG and
+ * MySQL only emit NOT NULL (NULL is the default). */
+function renderColumnDef(
+  driver: DatabaseDriver,
+  col: {
+    name: string;
+    dataType: string;
+    nullable: boolean;
+    default?: string | null;
+  },
+): string {
+  const parts = [quoteIdent(driver, col.name), col.dataType];
+  if (driver === "mssql") {
+    parts.push(col.nullable ? "NULL" : "NOT NULL");
+  } else if (!col.nullable) {
+    parts.push("NOT NULL");
+  }
+  if (col.default != null && col.default !== "") {
+    parts.push(`DEFAULT ${col.default}`);
+  }
+  return "  " + parts.join(" ");
+}
+
+/**
+ * Build a complete DDL script for an existing table — CREATE TABLE with
+ * columns + PRIMARY KEY, then CREATE INDEX for each non-primary index, then
+ * ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY for each FK. Sections are
+ * omitted gracefully when the corresponding arrays are empty.
+ *
+ * This is the same shape pg_dump / mysqldump / SQL Server's "Script as
+ * CREATE" produce, but condensed into a single script the user can paste
+ * elsewhere as-is.
+ */
+export function generateFullTableDDL(
+  driver: DatabaseDriver,
+  details: TableDetails,
+): string {
+  const { schema, name, columns, indexes, foreignKeys } = details;
+  const fqn = `${quoteIdent(driver, schema)}.${quoteIdent(driver, name)}`;
+
+  // ── CREATE TABLE ──────────────────────────────────────────────────────
+  const colLines = columns.map((c) =>
+    renderColumnDef(driver, {
+      name: c.name,
+      dataType: c.dataType,
+      nullable: c.nullable,
+      default: c.default,
+    }),
+  );
+  const pkCols = columns.filter((c) => c.isPrimaryKey).map((c) => c.name);
+  if (pkCols.length > 0) {
+    colLines.push(
+      `  PRIMARY KEY (${pkCols.map((c) => quoteIdent(driver, c)).join(", ")})`,
+    );
+  }
+  const sections: string[] = [];
+  sections.push(`CREATE TABLE ${fqn} (\n${colLines.join(",\n")}\n);`);
+
+  // ── INDEXES (skip the implicit one backing the PK) ────────────────────
+  const secondaryIndexes = indexes.filter((idx) => !idx.primary);
+  if (secondaryIndexes.length > 0) {
+    const block: string[] = ["-- Indexes"];
+    for (const idx of secondaryIndexes) {
+      const unique = idx.unique ? "UNIQUE " : "";
+      const idxName = quoteIdent(driver, idx.name);
+      const cols = idx.columns.map((c) => quoteIdent(driver, c)).join(", ");
+      block.push(`CREATE ${unique}INDEX ${idxName} ON ${fqn} (${cols});`);
+    }
+    sections.push(block.join("\n"));
+  }
+
+  // ── FOREIGN KEYS ──────────────────────────────────────────────────────
+  if (foreignKeys.length > 0) {
+    const block: string[] = ["-- Foreign keys"];
+    for (const fk of foreignKeys) {
+      // We emit FKs as ALTER TABLE statements (rather than inline in CREATE
+      // TABLE) so the script also works when the referenced tables haven't
+      // been created yet — the user can reorder if needed.
+      const refTable = `${quoteIdent(driver, fk.referencedSchema)}.${quoteIdent(
+        driver,
+        fk.referencedTable,
+      )}`;
+      const localCols = fk.columns.map((c) => quoteIdent(driver, c)).join(", ");
+      const refCols = fk.referencedColumns
+        .map((c) => quoteIdent(driver, c))
+        .join(", ");
+      const tail: string[] = [];
+      if (fk.onUpdate) tail.push(`ON UPDATE ${fk.onUpdate}`);
+      if (fk.onDelete) tail.push(`ON DELETE ${fk.onDelete}`);
+      const tailStr = tail.length ? " " + tail.join(" ") : "";
+      const constraintName = fk.name
+        ? `CONSTRAINT ${quoteIdent(driver, fk.name)} `
+        : "";
+      block.push(
+        `ALTER TABLE ${fqn}\n  ADD ${constraintName}FOREIGN KEY (${localCols}) REFERENCES ${refTable} (${refCols})${tailStr};`,
+      );
+    }
+    sections.push(block.join("\n"));
+  }
+
+  return sections.join("\n\n") + "\n";
 }
 
 /** Minimal column descriptor used by the generate-SQL helpers below. We don't

@@ -214,13 +214,36 @@ pub struct ConnectionOverview {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableDetails {
     pub schema: String,
     pub name: String,
     pub kind: RelationKind,
     pub columns: Vec<ColumnInfo>,
-    pub indexes: Vec<serde_json::Value>,
-    pub foreign_keys: Vec<serde_json::Value>,
+    pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

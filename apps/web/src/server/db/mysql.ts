@@ -244,6 +244,47 @@ export const mysqlDriver: DriverAdapter = {
         }
         entry.columns.push(columnName);
       }
+      // Foreign keys: aggregate columns per constraint with GROUP_CONCAT and
+      // split client-side. update_rule / delete_rule already come as text.
+      const [fkRows] = (await conn.query(
+        `SELECT
+           rc.constraint_name AS name,
+           GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) AS local_cols,
+           rc.unique_constraint_schema AS ref_schema,
+           rc.referenced_table_name AS ref_table,
+           GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position) AS ref_cols,
+           rc.update_rule AS on_update,
+           rc.delete_rule AS on_delete
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_schema = rc.constraint_schema
+          AND kcu.constraint_name = rc.constraint_name
+         WHERE kcu.table_schema = ? AND kcu.table_name = ?
+         GROUP BY rc.constraint_name, rc.unique_constraint_schema,
+                  rc.referenced_table_name, rc.update_rule, rc.delete_rule
+         ORDER BY rc.constraint_name`,
+        [schema, name],
+      )) as [Array<unknown[]>, unknown];
+      const foreignKeys = fkRows.map((row) => {
+        const [fkName, localCols, refSchema, refTable, refCols, onUpdate, onDelete] = row as [
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+        ];
+        return {
+          name: fkName,
+          columns: localCols.split(","),
+          referencedSchema: refSchema,
+          referencedTable: refTable,
+          referencedColumns: refCols.split(","),
+          onUpdate: onUpdate || undefined,
+          onDelete: onDelete || undefined,
+        };
+      });
       return {
         schema,
         name,
@@ -264,7 +305,7 @@ export const mysqlDriver: DriverAdapter = {
           if (a.unique !== b.unique) return a.unique ? -1 : 1;
           return a.name.localeCompare(b.name);
         }),
-        foreignKeys: [],
+        foreignKeys,
       };
     });
   },

@@ -21,6 +21,7 @@ import type {
 } from "@data-view/core";
 import {
   generateDeleteSql,
+  generateFullTableDDL,
   generateInsertSql,
   generateSelectSql,
   generateUpdateSql,
@@ -409,7 +410,9 @@ export function TablePane({
     [details],
   );
 
-  function generate(kind: "select" | "insert" | "update" | "delete") {
+  function generate(
+    kind: "select" | "insert" | "update" | "delete" | "ddl",
+  ) {
     setActionsOpen(false);
     let text: string;
     switch (kind) {
@@ -424,6 +427,10 @@ export function TablePane({
         break;
       case "delete":
         text = generateDeleteSql(driver, schema, name, genColumns);
+        break;
+      case "ddl":
+        if (!details) return; // covered by the menu's `disabled={!details}`
+        text = generateFullTableDDL(driver ?? "postgres", details);
         break;
     }
     onOpenInSqlEditor(text);
@@ -846,6 +853,10 @@ export function TablePane({
                   fontSize: 13,
                 }}
               >
+                <ActionItem
+                  label="Generar CREATE TABLE"
+                  onClick={() => generate("ddl")}
+                />
                 <ActionItem
                   label="Generar SELECT"
                   onClick={() => generate("select")}

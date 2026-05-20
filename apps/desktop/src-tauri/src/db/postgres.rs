@@ -1,8 +1,8 @@
 use crate::error::AppResult;
 use crate::model::{
-    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
-    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
-    QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, ForeignKeyInfo, IndexInfo, PageOptions,
+    QueryResult, QueryResultColumn, RelationInfo, RelationKind, ResolvedConnection, SchemaInfo,
+    TableDetails, TestConnectionResult, QUERY_LIMIT,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -220,13 +220,107 @@ pub async fn describe_table(
             }
         })
         .collect();
+    // Indexes — text[] columns come back as Vec<String> from tokio-postgres.
+    let idx_rows = client
+        .query(
+            "SELECT ic.relname AS name,
+                    i.indisunique AS is_unique,
+                    i.indisprimary AS is_primary,
+                    ARRAY(
+                      SELECT pg_get_indexdef(i.indexrelid, k + 1, true)
+                      FROM generate_subscripts(i.indkey, 1) AS k
+                      ORDER BY k
+                    ) AS columns
+             FROM pg_index i
+             JOIN pg_class ic ON ic.oid = i.indexrelid
+             JOIN pg_class tc ON tc.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = tc.relnamespace
+             WHERE n.nspname = $1 AND tc.relname = $2
+             ORDER BY i.indisprimary DESC, i.indisunique DESC, ic.relname",
+            &[&schema, &name],
+        )
+        .await?;
+    let indexes = idx_rows
+        .into_iter()
+        .map(|row| {
+            let nm: String = row.get(0);
+            let is_unique: bool = row.get(1);
+            let is_primary: bool = row.get(2);
+            let cols: Vec<String> = row.get(3);
+            IndexInfo {
+                name: nm,
+                columns: cols,
+                unique: is_unique,
+                primary: is_primary,
+            }
+        })
+        .collect();
+
+    // Foreign keys — single query resolves both column arrays.
+    let fk_rows = client
+        .query(
+            "SELECT
+               c.conname,
+               ARRAY(
+                 SELECT a.attname
+                 FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                 ORDER BY k.ord
+               ) AS local_cols,
+               n2.nspname AS ref_schema,
+               c2.relname AS ref_table,
+               ARRAY(
+                 SELECT a.attname
+                 FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum
+                 ORDER BY k.ord
+               ) AS ref_cols,
+               CASE c.confupdtype
+                 WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+                 WHEN 'c' THEN 'CASCADE'   WHEN 'n' THEN 'SET NULL'
+                 WHEN 'd' THEN 'SET DEFAULT' END,
+               CASE c.confdeltype
+                 WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+                 WHEN 'c' THEN 'CASCADE'   WHEN 'n' THEN 'SET NULL'
+                 WHEN 'd' THEN 'SET DEFAULT' END
+             FROM pg_constraint c
+             JOIN pg_class cls ON cls.oid = c.conrelid
+             JOIN pg_namespace n ON n.oid = cls.relnamespace
+             JOIN pg_class c2 ON c2.oid = c.confrelid
+             JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+             WHERE c.contype = 'f' AND n.nspname = $1 AND cls.relname = $2
+             ORDER BY c.conname",
+            &[&schema, &name],
+        )
+        .await?;
+    let foreign_keys = fk_rows
+        .into_iter()
+        .map(|row| {
+            let fkname: String = row.get(0);
+            let local: Vec<String> = row.get(1);
+            let rs: String = row.get(2);
+            let rt: String = row.get(3);
+            let refc: Vec<String> = row.get(4);
+            let on_update: Option<String> = row.try_get(5).ok();
+            let on_delete: Option<String> = row.try_get(6).ok();
+            ForeignKeyInfo {
+                name: fkname,
+                columns: local,
+                referenced_schema: rs,
+                referenced_table: rt,
+                referenced_columns: refc,
+                on_update,
+                on_delete,
+            }
+        })
+        .collect();
     Ok(TableDetails {
         schema: schema.into(),
         name: name.into(),
         kind: RelationKind::Table,
         columns,
-        indexes: vec![],
-        foreign_keys: vec![],
+        indexes,
+        foreign_keys,
     })
 }
 

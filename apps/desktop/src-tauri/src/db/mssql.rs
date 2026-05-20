@@ -1,8 +1,8 @@
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
-    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
-    QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, ForeignKeyInfo, IndexInfo, PageOptions,
+    QueryResult, QueryResultColumn, RelationInfo, RelationKind, ResolvedConnection, SchemaInfo,
+    TableDetails, TestConnectionResult, QUERY_LIMIT,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -252,13 +252,115 @@ pub async fn describe_table(
             default: row.get::<&str, _>(3).map(String::from),
         })
         .collect();
+    // Indexes from sys.indexes — drop tiberius rows into a BTreeMap to group
+    // columns per index name.
+    let idx_stream = client
+        .query(
+            "SELECT i.name AS index_name,
+                    i.is_unique,
+                    i.is_primary_key,
+                    c.name AS column_name,
+                    ic.key_ordinal
+             FROM sys.indexes i
+             JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+             JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+             JOIN sys.tables t ON t.object_id = i.object_id
+             JOIN sys.schemas s ON s.schema_id = t.schema_id
+             WHERE s.name = @P1 AND t.name = @P2 AND i.name IS NOT NULL
+               AND ic.is_included_column = 0
+             ORDER BY i.name, ic.key_ordinal",
+            &[&schema, &name],
+        )
+        .await?;
+    let idx_rows = idx_stream.into_first_result().await?;
+    let mut idx_map: std::collections::BTreeMap<String, IndexInfo> =
+        std::collections::BTreeMap::new();
+    for row in idx_rows {
+        let idx_name: &str = row.get(0).unwrap_or("");
+        let is_unique: bool = row.get(1).unwrap_or(false);
+        let is_primary: bool = row.get(2).unwrap_or(false);
+        let col_name: &str = row.get(3).unwrap_or("");
+        if idx_name.is_empty() {
+            continue;
+        }
+        let entry = idx_map
+            .entry(idx_name.to_string())
+            .or_insert_with(|| IndexInfo {
+                name: idx_name.to_string(),
+                columns: Vec::new(),
+                unique: is_unique,
+                primary: is_primary,
+            });
+        entry.columns.push(col_name.to_string());
+    }
+    let mut indexes: Vec<IndexInfo> = idx_map.into_values().collect();
+    indexes.sort_by(|a, b| {
+        b.primary
+            .cmp(&a.primary)
+            .then(b.unique.cmp(&a.unique))
+            .then(a.name.cmp(&b.name))
+    });
+    // Foreign keys from sys.foreign_keys with STRING_AGG (SQL Server 2017+).
+    let fk_stream = client
+        .query(
+            "SELECT fk.name,
+                    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS local_cols,
+                    ref_s.name,
+                    ref_t.name,
+                    STRING_AGG(ref_c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_cols,
+                    fk.update_referential_action_desc,
+                    fk.delete_referential_action_desc
+             FROM sys.foreign_keys fk
+             JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+             JOIN sys.columns c ON c.object_id = fk.parent_object_id AND c.column_id = fkc.parent_column_id
+             JOIN sys.columns ref_c ON ref_c.object_id = fk.referenced_object_id AND ref_c.column_id = fkc.referenced_column_id
+             JOIN sys.tables ref_t ON ref_t.object_id = fk.referenced_object_id
+             JOIN sys.schemas ref_s ON ref_s.schema_id = ref_t.schema_id
+             JOIN sys.tables tab ON tab.object_id = fk.parent_object_id
+             JOIN sys.schemas sch ON sch.schema_id = tab.schema_id
+             WHERE sch.name = @P1 AND tab.name = @P2
+             GROUP BY fk.name, ref_s.name, ref_t.name,
+                      fk.update_referential_action_desc,
+                      fk.delete_referential_action_desc
+             ORDER BY fk.name",
+            &[&schema, &name],
+        )
+        .await?;
+    let fk_rows = fk_stream.into_first_result().await?;
+    let foreign_keys: Vec<ForeignKeyInfo> = fk_rows
+        .into_iter()
+        .map(|row| {
+            let fkname: &str = row.get(0).unwrap_or("");
+            let local: &str = row.get(1).unwrap_or("");
+            let rs: &str = row.get(2).unwrap_or("");
+            let rt: &str = row.get(3).unwrap_or("");
+            let refc: &str = row.get(4).unwrap_or("");
+            let up: Option<&str> = row.get(5);
+            let del: Option<&str> = row.get(6);
+            // sys.foreign_keys uses NO_ACTION / SET_NULL etc; convert to the
+            // standard "NO ACTION" / "SET NULL" form so the generated DDL is
+            // valid as-is.
+            let normalize = |s: Option<&str>| -> Option<String> {
+                s.filter(|v| !v.is_empty()).map(|v| v.replace('_', " "))
+            };
+            ForeignKeyInfo {
+                name: fkname.to_string(),
+                columns: local.split(',').map(String::from).collect(),
+                referenced_schema: rs.to_string(),
+                referenced_table: rt.to_string(),
+                referenced_columns: refc.split(',').map(String::from).collect(),
+                on_update: normalize(up),
+                on_delete: normalize(del),
+            }
+        })
+        .collect();
     Ok(TableDetails {
         schema: schema.into(),
         name: name.into(),
         kind: RelationKind::Table,
         columns,
-        indexes: vec![],
-        foreign_keys: vec![],
+        indexes,
+        foreign_keys,
     })
 }
 
