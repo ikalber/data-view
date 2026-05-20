@@ -1,5 +1,12 @@
 import mysql from "mysql2/promise";
-import type { ColumnInfo, QueryResult, QueryResultColumn } from "@data-view/core";
+import type {
+  ColumnInfo,
+  CreateSchemaOptions,
+  CreateTableColumn,
+  CreateTableOptions,
+  QueryResult,
+  QueryResultColumn,
+} from "@data-view/core";
 import { quoteIdent as qiCore } from "@data-view/core";
 import type {
   DriverAdapter,
@@ -373,6 +380,24 @@ export const mysqlDriver: DriverAdapter = {
   generateCreateTableSql(_c, schema, name, columns) {
     return buildMysqlCreateTable(schema, name, columns);
   },
+
+  async createSchema(c, options) {
+    const name = options.name.trim();
+    if (!name) throw new Error("El nombre no puede estar vacío");
+    const parts = [`CREATE DATABASE ${ident(name)}`];
+    if (options.charset) parts.push(`CHARACTER SET ${quoteStringMysql(options.charset)}`);
+    if (options.collation) parts.push(`COLLATE ${quoteStringMysql(options.collation)}`);
+    await this.runQuery(c, parts.join(" "));
+  },
+
+  async createTable(c, options) {
+    const sqlText = buildMysqlCreateTableFromDraft(
+      options.schema,
+      options.name,
+      options.columns,
+    );
+    await this.runQuery(c, sqlText);
+  },
 };
 
 function buildMysqlCreateTable(
@@ -393,6 +418,37 @@ function buildMysqlCreateTable(
   return `CREATE TABLE ${qiCore("mysql", schema)}.${qiCore("mysql", name)} (\n${colLines.join(
     ",\n",
   )}\n);`;
+}
+
+function buildMysqlCreateTableFromDraft(
+  schema: string,
+  name: string,
+  columns: CreateTableColumn[],
+): string {
+  if (!schema.trim()) throw new Error("Database requerida");
+  if (!name.trim()) throw new Error("Nombre de tabla requerido");
+  if (columns.length === 0) throw new Error("Agregá al menos una columna");
+  const colLines = columns.map((c) => {
+    if (!c.name.trim()) throw new Error("Hay una columna sin nombre");
+    if (!c.dataType.trim()) throw new Error(`Falta el tipo de "${c.name}"`);
+    const parts = [qiCore("mysql", c.name), c.dataType];
+    if (!c.nullable) parts.push("NOT NULL");
+    if (c.default != null && c.default !== "") parts.push(`DEFAULT ${c.default}`);
+    return "  " + parts.join(" ");
+  });
+  const pk = columns
+    .filter((c) => c.primaryKey)
+    .map((c) => qiCore("mysql", c.name));
+  if (pk.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  return `CREATE TABLE ${qiCore("mysql", schema)}.${qiCore("mysql", name)} (\n${colLines.join(
+    ",\n",
+  )}\n);`;
+}
+
+function quoteStringMysql(s: string): string {
+  return "'" + s.replace(/'/g, "''") + "'";
 }
 
 export type { IterateTableOptions };

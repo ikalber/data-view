@@ -80,6 +80,50 @@ export interface Transport {
     connectionId: string,
     options: ExportDatabaseOptions,
   ): Promise<ExportDatabaseResult>;
+
+  /**
+   * Create whatever the sidebar lists under "schema" for this driver:
+   *  - Postgres / SQL Server → `CREATE SCHEMA …` inside the active database.
+   *  - MySQL/MariaDB → `CREATE DATABASE …` (schema and database are aliases).
+   * The newly created item shows up in `listSchemas` after a refresh.
+   */
+  createSchema(
+    connectionId: string,
+    options: CreateSchemaOptions,
+  ): Promise<void>;
+
+  /** Create a table inside an existing schema/database. */
+  createTable(
+    connectionId: string,
+    options: CreateTableOptions,
+  ): Promise<void>;
+}
+
+export interface CreateSchemaOptions {
+  name: string;
+  /** MySQL only — default character set. */
+  charset?: string;
+  /** MySQL / SQL Server — default collation. */
+  collation?: string;
+  /** Postgres only — owner role for the new schema. */
+  owner?: string;
+}
+
+export interface CreateTableColumn {
+  name: string;
+  /** Raw SQL type expression as the user typed it (e.g. `varchar(255)`,
+   * `int identity(1,1)`). Driver-specific — no validation here. */
+  dataType: string;
+  nullable: boolean;
+  primaryKey: boolean;
+  /** Raw default expression placed verbatim after `DEFAULT`. */
+  default?: string | null;
+}
+
+export interface CreateTableOptions {
+  schema: string;
+  name: string;
+  columns: CreateTableColumn[];
 }
 
 export interface RunQueryOptions {

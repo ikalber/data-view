@@ -1,5 +1,5 @@
 import { AppShell, ThemeProvider, TransportProvider } from "@data-view/ui";
-import { tauriTransport } from "./transport/tauri-transport";
+import { pickAndReadSqlFile, tauriTransport } from "./transport/tauri-transport";
 import { ZoomController } from "./zoom/ZoomController";
 
 export function App() {
@@ -9,6 +9,7 @@ export function App() {
         <ZoomController />
         <AppShell
           enableCloseTabShortcut
+          onPickSqlFile={pickAndReadSqlFile}
           userArea={
             <span
               style={{

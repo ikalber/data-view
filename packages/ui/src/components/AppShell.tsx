@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -17,6 +18,8 @@ import type { TabGroup } from "./workspace-tab";
 import { useTransport } from "../transport-context";
 import { ConnectionForm } from "./ConnectionForm";
 import { ConnectionOverviewPane } from "./ConnectionOverviewPane";
+import { CreateDatabaseModal } from "./CreateDatabaseModal";
+import { CreateTableModal } from "./CreateTableModal";
 import { HistoryPane } from "./HistoryPane";
 import { ManageConnectionsModal } from "./ManageConnectionsModal";
 import { OverviewPane } from "./OverviewPane";
@@ -41,6 +44,13 @@ interface Props {
    * pestaña del browser y no puede interceptarse de forma confiable.
    */
   enableCloseTabShortcut?: boolean;
+  /**
+   * When provided, the "Abrir .sql" action calls this picker — the desktop
+   * wires it to the Tauri file dialog + a Rust read_text_file command. When
+   * omitted (web), AppShell falls back to a hidden `<input type="file">` and
+   * reads the file via FileReader.
+   */
+  onPickSqlFile?: () => Promise<{ name: string; sql: string } | null>;
 }
 
 const TABS_KEY = (id: string) => `dbview.workspaceTabs.${id}`;
@@ -92,6 +102,10 @@ type DistributiveOmit<T, K extends keyof any> = T extends unknown
   ? Omit<T, K>
   : never;
 
+function stripSqlExt(name: string): string {
+  return name.replace(/\.sql$/i, "");
+}
+
 function untitledSqlName(tabs: WorkspaceTab[]): string {
   const taken = new Set(
     tabs.filter((t) => t.kind === "sql").map((t) => (t as { title: string }).title),
@@ -101,7 +115,11 @@ function untitledSqlName(tabs: WorkspaceTab[]): string {
   return `Sin título ${n}`;
 }
 
-export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
+export function AppShell({
+  userArea,
+  enableCloseTabShortcut,
+  onPickSqlFile,
+}: Props) {
   const transport = useTransport();
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -126,6 +144,13 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   const [activeSchema, setActiveSchema] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
+  const [showCreateDb, setShowCreateDb] = useState(false);
+  const [showCreateTable, setShowCreateTable] = useState<string | null>(null);
+  /** Bumped whenever a schema/table is created so the Sidebar's effects
+   * re-fetch schemas/relations without us having to plumb a callback through
+   * its internals. The Sidebar keys its useEffect deps on `connectionId` and
+   * `activeSchema`; we leverage a noop schema bounce here instead. */
+  const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
 
   // Hidratar el ancho del sidebar desde localStorage al montar. Se hace en un
   // efecto (en vez de en el initializer del useState) para no romper SSR.
@@ -546,14 +571,17 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
   );
 
   const openSql = useCallback(
-    (seed?: string, opts?: { database?: string | null }) => {
+    (
+      seed?: string,
+      opts?: { database?: string | null; title?: string },
+    ) => {
       const newId = uid();
       setTabs((prev) => [
         ...prev,
         {
           id: newId,
           kind: "sql",
-          title: untitledSqlName(prev),
+          title: opts?.title ?? untitledSqlName(prev),
           sql: seed ?? "",
           fileId: null,
           database:
@@ -564,6 +592,45 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
     },
     [activeSchema],
   );
+
+  // ── Open .sql from disk ────────────────────────────────────────────────────
+  // Desktop wires `onPickSqlFile` to a Tauri dialog + Rust read_text_file
+  // command. In the browser we lazy-create a hidden `<input type="file">` so
+  // the user picks via the OS dialog and FileReader gives us the contents.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const openSqlFromDisk = useCallback(async () => {
+    try {
+      if (onPickSqlFile) {
+        const picked = await onPickSqlFile();
+        if (!picked) return;
+        openSql(picked.sql, { title: stripSqlExt(picked.name) });
+        return;
+      }
+      // Fallback path: hidden <input type="file"> for the web app.
+      const input =
+        fileInputRef.current ?? document.createElement("input");
+      input.type = "file";
+      input.accept = ".sql,text/plain";
+      input.style.display = "none";
+      if (!fileInputRef.current) {
+        document.body.appendChild(input);
+        fileInputRef.current = input;
+      }
+      const file = await new Promise<File | null>((resolve) => {
+        input.value = "";
+        input.onchange = () => {
+          const f = input.files?.[0] ?? null;
+          resolve(f);
+        };
+        input.click();
+      });
+      if (!file) return;
+      const sql = await file.text();
+      openSql(sql, { title: stripSqlExt(file.name) });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [onPickSqlFile, openSql]);
 
   const openTable = useCallback(
     (schema: string, name: string, opts?: { preview?: boolean }) => {
@@ -879,6 +946,7 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
             onSave={saveSqlTab}
             onOpenFile={openSqlFile}
             onDeleteFile={deleteSqlFile}
+            onOpenLocalFile={openSqlFromDisk}
             isActive={tab.id === activeTabId}
             database={tab.database ?? null}
             onChangeDatabase={(d) => updateTabDatabase(tab.id, d)}
@@ -930,6 +998,13 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
           onSelectConnection={selectConnection}
           onOpenTableInConnection={openTableInConnection}
           onOpenDatabaseInConnection={openDatabaseInConnection}
+          onCreateDatabase={active ? () => setShowCreateDb(true) : undefined}
+          onCreateTable={
+            active
+              ? (schema) => setShowCreateTable(schema ?? activeSchema ?? null)
+              : undefined
+          }
+          refreshToken={sidebarRefreshToken}
         />
         <SidebarResizer
           width={sidebarWidth}
@@ -1001,6 +1076,32 @@ export function AppShell({ userArea, enableCloseTabShortcut }: Props) {
       )}
       {/* Rendered after the manage modal so when both are open the form
           stacks visually on top. */}
+      {showCreateDb && active && (
+        <CreateDatabaseModal
+          connection={active}
+          onClose={() => setShowCreateDb(false)}
+          onCreated={(name) => {
+            setShowCreateDb(false);
+            setSidebarRefreshToken((n) => n + 1);
+            setActiveSchema(name);
+            openDatabase(name, { preview: false });
+          }}
+        />
+      )}
+      {showCreateTable !== null && active && (
+        <CreateTableModal
+          connection={active}
+          schemas={schemas}
+          initialSchema={showCreateTable}
+          onClose={() => setShowCreateTable(null)}
+          onCreated={({ schema, name }) => {
+            setShowCreateTable(null);
+            setSidebarRefreshToken((n) => n + 1);
+            setActiveSchema(schema);
+            openTable(schema, name, { preview: false });
+          }}
+        />
+      )}
       {showForm && (
         <ConnectionForm
           folders={folders}

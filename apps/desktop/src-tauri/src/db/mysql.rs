@@ -1,7 +1,8 @@
 use crate::error::AppResult;
 use crate::model::{
-    ColumnInfo, PageOptions, QueryResult, QueryResultColumn, RelationInfo, RelationKind,
-    ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult, QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
+    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
+    QUERY_LIMIT,
 };
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Opts, OptsBuilder, Row, Value as MyValue};
@@ -97,6 +98,85 @@ pub async fn list_relations(
             }
         })
         .collect())
+}
+
+pub async fn get_connection_overview(c: &ResolvedConnection) -> AppResult<ConnectionOverview> {
+    let mut conn = connect(c).await?;
+    let sys: std::collections::HashSet<&str> =
+        ["information_schema", "mysql", "performance_schema", "sys"]
+            .into_iter()
+            .collect();
+
+    let meta: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<u64>)> =
+        conn.query_first(
+            "SELECT VERSION(), DATABASE(), CURRENT_USER(), DATE_FORMAT(NOW(), '%Y-%m-%dT%H:%i:%s'), @@max_connections",
+        )
+        .await?;
+    let (version, current_db, current_user, server_time, max_conn) =
+        meta.unwrap_or((None, None, None, None, None));
+
+    // Uptime via SHOW GLOBAL STATUS — wrap to survive missing privilege.
+    let uptime: Option<u64> = match conn
+        .query_first::<(String, String), _>("SHOW GLOBAL STATUS LIKE 'Uptime'")
+        .await
+    {
+        Ok(Some((_, v))) => v.parse::<u64>().ok(),
+        _ => None,
+    };
+
+    let db_rows: Vec<(String, Option<u64>, u64, Option<String>)> = conn
+        .query(
+            "SELECT s.schema_name,
+                    COALESCE(SUM(t.data_length + t.index_length), 0),
+                    COUNT(t.table_name),
+                    s.default_character_set_name
+             FROM information_schema.schemata s
+             LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name
+             GROUP BY s.schema_name, s.default_character_set_name
+             ORDER BY s.schema_name",
+        )
+        .await
+        .unwrap_or_default();
+
+    let active: Option<u64> = conn
+        .query_first::<u64, _>(
+            "SELECT COUNT(*) FROM information_schema.processlist",
+        )
+        .await
+        .ok()
+        .flatten();
+
+    let _ = conn.disconnect().await;
+
+    let mut databases = Vec::with_capacity(db_rows.len());
+    let mut total: u64 = 0;
+    for (name, size_bytes, rel_count, charset) in db_rows {
+        let size = size_bytes.and_then(|s| if s > 0 { Some(s) } else { None });
+        if let Some(s) = size {
+            total = total.saturating_add(s);
+        }
+        let is_system = sys.contains(name.as_str());
+        databases.push(DatabaseSummary {
+            name,
+            is_system,
+            size_bytes: size,
+            relation_count: Some(rel_count),
+            details: charset,
+        });
+    }
+
+    Ok(ConnectionOverview {
+        driver: "mysql".to_string(),
+        server_version: version.map(|v| format!("MySQL {}", v)),
+        current_database: current_db,
+        current_user,
+        server_time,
+        uptime_seconds: uptime,
+        total_size_bytes: if total > 0 { Some(total) } else { None },
+        active_connections: active,
+        max_connections: max_conn,
+        databases,
+    })
 }
 
 pub async fn describe_table(

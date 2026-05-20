@@ -4,8 +4,9 @@ use crate::export::{
     self, ExportDatabaseOptions, ExportDatabaseResult, ExportTableOptions, ExportTableResult,
 };
 use crate::model::{
-    ConnectionConfig, ConnectionInput, Folder, FolderInput, PageOptions, QueryResult,
-    RelationInfo, SchemaInfo, TableDetails, Tag, TagInput, TestConnectionResult,
+    ConnectionConfig, ConnectionInput, ConnectionOverview, CreateSchemaOptions, CreateTableOptions,
+    Folder, FolderInput, PageOptions, QueryResult, RelationInfo, SchemaInfo, TableDetails, Tag,
+    TagInput, TestConnectionResult,
 };
 use crate::state::AppState;
 use std::path::PathBuf;
@@ -93,6 +94,15 @@ pub async fn list_relations(
 }
 
 #[tauri::command]
+pub async fn get_connection_overview(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<ConnectionOverview> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::get_connection_overview(&conn).await
+}
+
+#[tauri::command]
 pub async fn describe_table(
     connection_id: String,
     schema: String,
@@ -156,4 +166,52 @@ pub async fn export_database(
         return Err(AppError::msg("ruta de destino vacía"));
     }
     export::export_database_to_path(&conn, options, path).await
+}
+
+#[tauri::command]
+pub async fn create_schema(
+    connection_id: String,
+    options: CreateSchemaOptions,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::create_schema(&conn, &options).await
+}
+
+#[tauri::command]
+pub async fn create_table(
+    connection_id: String,
+    options: CreateTableOptions,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::create_table(&conn, &options).await
+}
+
+/// Read a UTF-8 text file from disk. Used by the desktop app to open .sql
+/// files picked from the OS dialog and load them into a new SQL editor tab.
+/// Limited to a generous-but-finite size so an accidental pick of a huge
+/// non-SQL file can't lock up the UI.
+#[tauri::command]
+pub async fn read_text_file(path: String) -> AppResult<String> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let p = PathBuf::from(&path);
+    if p.as_os_str().is_empty() {
+        return Err(AppError::msg("ruta vacía"));
+    }
+    let metadata = tokio::fs::metadata(&p)
+        .await
+        .map_err(|e| AppError::msg(format!("No se pudo leer {}: {}", path, e)))?;
+    if metadata.len() > MAX_BYTES {
+        return Err(AppError::msg(format!(
+            "Archivo demasiado grande ({} MB; máximo {} MB)",
+            metadata.len() / (1024 * 1024),
+            MAX_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = tokio::fs::read(&p)
+        .await
+        .map_err(|e| AppError::msg(format!("No se pudo leer {}: {}", path, e)))?;
+    String::from_utf8(bytes)
+        .map_err(|_| AppError::msg("El archivo no parece UTF-8 válido"))
 }

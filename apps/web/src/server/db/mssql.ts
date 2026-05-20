@@ -1,5 +1,12 @@
 import sql from "mssql";
-import type { ColumnInfo, QueryResult, QueryResultColumn } from "@data-view/core";
+import type {
+  ColumnInfo,
+  CreateSchemaOptions,
+  CreateTableColumn,
+  CreateTableOptions,
+  QueryResult,
+  QueryResultColumn,
+} from "@data-view/core";
 import { quoteIdent as qiCore } from "@data-view/core";
 import type {
   DriverAdapter,
@@ -366,6 +373,23 @@ export const mssqlDriver: DriverAdapter = {
   generateCreateTableSql(_c, schema, name, columns) {
     return buildMssqlCreateTable(schema, name, columns);
   },
+
+  async createSchema(c, options) {
+    const name = options.name.trim();
+    if (!name) throw new Error("El nombre no puede estar vacío");
+    // CREATE SCHEMA must be the only statement in its batch — runQuery sends a
+    // single batch, so this is fine.
+    await this.runQuery(c, `CREATE SCHEMA ${ident(name)}`);
+  },
+
+  async createTable(c, options) {
+    const sqlText = buildMssqlCreateTableFromDraft(
+      options.schema,
+      options.name,
+      options.columns,
+    );
+    await this.runQuery(c, sqlText);
+  },
 };
 
 async function firstOrderingColumn(
@@ -411,6 +435,33 @@ function buildMssqlCreateTable(
     return "  " + parts.join(" ");
   });
   const pk = columns.filter((c) => c.isPrimaryKey).map((c) => qiCore("mssql", c.name));
+  if (pk.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  return `CREATE TABLE ${qiCore("mssql", schema)}.${qiCore("mssql", name)} (\n${colLines.join(
+    ",\n",
+  )}\n);`;
+}
+
+function buildMssqlCreateTableFromDraft(
+  schema: string,
+  name: string,
+  columns: CreateTableColumn[],
+): string {
+  if (!schema.trim()) throw new Error("Schema requerido");
+  if (!name.trim()) throw new Error("Nombre de tabla requerido");
+  if (columns.length === 0) throw new Error("Agregá al menos una columna");
+  const colLines = columns.map((c) => {
+    if (!c.name.trim()) throw new Error("Hay una columna sin nombre");
+    if (!c.dataType.trim()) throw new Error(`Falta el tipo de "${c.name}"`);
+    const parts = [qiCore("mssql", c.name), c.dataType];
+    parts.push(c.nullable ? "NULL" : "NOT NULL");
+    if (c.default != null && c.default !== "") parts.push(`DEFAULT ${c.default}`);
+    return "  " + parts.join(" ");
+  });
+  const pk = columns
+    .filter((c) => c.primaryKey)
+    .map((c) => qiCore("mssql", c.name));
   if (pk.length > 0) {
     colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
   }

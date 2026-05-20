@@ -36,6 +36,8 @@ export { QueryEditor } from "./components/QueryEditor";
 export { ResultsTable } from "./components/ResultsTable";
 export { ExportMenu } from "./components/ExportMenu";
 export { ExportDatabaseModal } from "./components/ExportDatabaseModal";
+export { CreateDatabaseModal } from "./components/CreateDatabaseModal";
+export { CreateTableModal } from "./components/CreateTableModal";
 export { HistoryPane } from "./components/HistoryPane";
 export {
   useQueryHistory,

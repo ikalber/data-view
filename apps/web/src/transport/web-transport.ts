@@ -2,6 +2,8 @@ import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  CreateSchemaOptions,
+  CreateTableOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
   ExportTableOptions,
@@ -108,6 +110,16 @@ export const webTransport: Transport = {
     };
     return out;
   },
+  createSchema: (connectionId, options: CreateSchemaOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/databases`, {
+      method: "POST",
+      body: JSON.stringify(options),
+    }) as unknown as Promise<void>,
+  createTable: (connectionId, options: CreateTableOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/tables`, {
+      method: "POST",
+      body: JSON.stringify(options),
+    }) as unknown as Promise<void>,
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const meta = await downloadExport(
       `/api/connections/${connectionId}/export-database`,

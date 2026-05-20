@@ -187,6 +187,31 @@ pub struct ColumnInfo {
     pub default: Option<String>,
 }
 
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseSummary {
+    pub name: String,
+    pub is_system: bool,
+    pub size_bytes: Option<u64>,
+    pub relation_count: Option<u64>,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionOverview {
+    pub driver: String,
+    pub server_version: Option<String>,
+    pub current_database: Option<String>,
+    pub current_user: Option<String>,
+    pub server_time: Option<String>,
+    pub uptime_seconds: Option<u64>,
+    pub total_size_bytes: Option<u64>,
+    pub active_connections: Option<u64>,
+    pub max_connections: Option<u64>,
+    pub databases: Vec<DatabaseSummary>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDetails {
@@ -237,3 +262,34 @@ pub struct OrderBy {
 }
 
 pub const QUERY_LIMIT: usize = 5000;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSchemaOptions {
+    pub name: String,
+    #[serde(default)]
+    pub charset: Option<String>,
+    #[serde(default)]
+    pub collation: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTableColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTableOptions {
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<CreateTableColumn>,
+}

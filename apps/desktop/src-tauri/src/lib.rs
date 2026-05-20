@@ -28,11 +28,15 @@ pub fn run() {
             commands::delete_tag,
             commands::list_schemas,
             commands::list_relations,
+            commands::get_connection_overview,
             commands::describe_table,
             commands::run_query,
             commands::fetch_table_data,
             commands::export_table,
             commands::export_database,
+            commands::create_schema,
+            commands::create_table,
+            commands::read_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running data-view");

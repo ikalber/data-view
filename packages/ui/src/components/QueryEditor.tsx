@@ -49,6 +49,9 @@ interface Props {
   onOpenFile: (file: SavedFile, opts?: { preview?: boolean }) => void;
   /** Delete a saved file. */
   onDeleteFile: (file: SavedFile) => void;
+  /** Pick a `.sql` from disk and open it in a new editor tab. Desktop wires
+   * this to the Tauri file dialog; web falls back to `<input type="file">`. */
+  onOpenLocalFile?: () => void | Promise<void>;
   /** Whether this editor is the currently visible tab. */
   isActive: boolean;
   /** Database/schema the script targets; null = connection default. */
@@ -77,6 +80,7 @@ export function QueryEditor({
   onSave,
   onOpenFile,
   onDeleteFile,
+  onOpenLocalFile,
   isActive,
   database,
   onChangeDatabase,
@@ -362,6 +366,16 @@ export function QueryEditor({
             ⌘S
           </span>
         </button>
+        {onOpenLocalFile && (
+          <button
+            type="button"
+            className="dv-button"
+            onClick={() => void onOpenLocalFile()}
+            title="Abrir un archivo .sql del disco"
+          >
+            Abrir .sql
+          </button>
+        )}
         <div className="dv-sql-files" ref={filesMenuRef}>
           <button
             type="button"

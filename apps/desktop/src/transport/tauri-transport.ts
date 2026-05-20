@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  CreateSchemaOptions,
+  CreateTableOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
   ExportFormat,
@@ -76,6 +78,10 @@ export const tauriTransport: Transport = {
       targetPath,
     });
   },
+  createSchema: (connectionId, options: CreateSchemaOptions) =>
+    call<void>("create_schema", { connectionId, options }),
+  createTable: (connectionId, options: CreateTableOptions) =>
+    call<void>("create_table", { connectionId, options }),
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const targetPath = await pickSaveLocation("database", "sql");
     if (!targetPath) throw new ExportCancelled();
@@ -86,6 +92,30 @@ export const tauriTransport: Transport = {
     });
   },
 };
+
+/**
+ * Open an OS file picker for a `.sql` file and return its filename + contents.
+ * Returns `null` if the user cancels the dialog. Used by the desktop app to
+ * load a script from disk into a new SQL editor tab.
+ */
+export async function pickAndReadSqlFile(): Promise<{
+  name: string;
+  sql: string;
+} | null> {
+  const result = await open({
+    multiple: false,
+    filters: [
+      { name: "SQL", extensions: ["sql"] },
+      { name: "Texto", extensions: ["txt"] },
+      { name: "Todos", extensions: ["*"] },
+    ],
+  });
+  if (!result || Array.isArray(result)) return null;
+  const path = result as string;
+  const sql = await call<string>("read_text_file", { path });
+  const base = path.split(/[\\/]/).pop() ?? "abierto.sql";
+  return { name: base, sql };
+}
 
 export class ExportCancelled extends Error {
   constructor() {

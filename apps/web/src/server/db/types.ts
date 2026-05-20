@@ -2,6 +2,8 @@ import type {
   ColumnInfo,
   ConnectionConfig,
   ConnectionOverview,
+  CreateSchemaOptions,
+  CreateTableOptions,
   PageOptions,
   QueryResult,
   QueryResultColumn,
@@ -73,4 +75,7 @@ export interface DriverAdapter {
     name: string,
     columns: ColumnInfo[],
   ): string;
+
+  createSchema(conn: ResolvedConnection, options: CreateSchemaOptions): Promise<void>;
+  createTable(conn: ResolvedConnection, options: CreateTableOptions): Promise<void>;
 }

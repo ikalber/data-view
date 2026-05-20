@@ -60,6 +60,14 @@ interface Props {
     schema: string,
     opts?: OpenOpts,
   ) => void;
+  /** Open the "Create database/schema" modal for the active connection. */
+  onCreateDatabase?: () => void;
+  /** Open the "Create table" modal targeting the given schema (or the active
+   * one if omitted). */
+  onCreateTable?: (schema?: string | null) => void;
+  /** Bumped by the parent after a create-schema/create-table action so the
+   * sidebar refetches schemas and relations without losing local state. */
+  refreshToken?: number;
 }
 
 interface NavItem {
@@ -104,6 +112,9 @@ export function Sidebar({
   onSelectConnection,
   onOpenTableInConnection,
   onOpenDatabaseInConnection,
+  onCreateDatabase,
+  onCreateTable,
+  refreshToken = 0,
 }: Props) {
   const transport = useTransport();
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
@@ -204,13 +215,21 @@ export function Sidebar({
       cancel = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, transport]);
+  }, [connectionId, transport, refreshToken]);
 
   // Reset cached tree relations when connection changes.
   useEffect(() => {
     setTreeRelations({});
     setExpanded(new Set());
   }, [connectionId]);
+
+  // After a create-schema/create-table the parent bumps refreshToken; drop
+  // the tree-relations cache so the next expand re-fetches and any
+  // already-expanded schema reloads via the activeSchema effect above.
+  useEffect(() => {
+    if (refreshToken === 0) return;
+    setTreeRelations({});
+  }, [refreshToken]);
 
   // Load tables for the active schema (used by select mode and to highlight
   // the active table in tree mode).
@@ -236,7 +255,7 @@ export function Sidebar({
     return () => {
       cancel = true;
     };
-  }, [connectionId, activeSchema, transport]);
+  }, [connectionId, activeSchema, transport, refreshToken]);
 
   // In tree mode, ensure the active schema is auto-expanded.
   useEffect(() => {
@@ -529,10 +548,22 @@ export function Sidebar({
         <div className="dv-schema-picker" ref={pickerRef}>
           <div className="dv-schema-picker-label-row">
             <span className="dv-schema-picker-label">{pickerLabel}</span>
+            {onCreateDatabase && (
+              <button
+                type="button"
+                className="dv-icon-button"
+                title={`Crear ${pickerLabel.toLowerCase()}`}
+                aria-label={`Crear ${pickerLabel.toLowerCase()}`}
+                onClick={onCreateDatabase}
+              >
+                +
+              </button>
+            )}
             <div
               className="dv-mode-toggle"
               role="group"
               aria-label="Modo de navegación"
+              style={{ marginLeft: "auto" }}
             >
               <button
                 type="button"
@@ -681,6 +712,18 @@ export function Sidebar({
         <div className="dv-tables-section">
           <div className="dv-tables-header">
             <span>Tablas{activeSchema ? ` · ${relations.length}` : ""}</span>
+            {onCreateTable && activeSchema && (
+              <button
+                type="button"
+                className="dv-icon-button"
+                title="Crear tabla"
+                aria-label="Crear tabla"
+                onClick={() => onCreateTable(activeSchema)}
+                style={{ marginLeft: "auto" }}
+              >
+                +
+              </button>
+            )}
           </div>
           {activeSchema && relations.length > 8 && (
             <div className="dv-tables-search">
@@ -814,6 +857,21 @@ export function Sidebar({
                   <span>{s.name}</span>
                   {rels && (
                     <span className="dv-schema-tree-count">{rels.length}</span>
+                  )}
+                  {onCreateTable && !s.isSystem && (
+                    <button
+                      type="button"
+                      className="dv-icon-button"
+                      title="Crear tabla acá"
+                      aria-label="Crear tabla"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCreateTable(s.name);
+                      }}
+                      style={{ marginLeft: "auto" }}
+                    >
+                      +
+                    </button>
                   )}
                 </div>
                 {isExpanded && (

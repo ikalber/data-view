@@ -1,7 +1,8 @@
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    ColumnInfo, PageOptions, QueryResult, QueryResultColumn, RelationInfo, RelationKind,
-    ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult, QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
+    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
+    QUERY_LIMIT,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -129,6 +130,98 @@ pub async fn list_relations(
             }
         })
         .collect())
+}
+
+pub async fn get_connection_overview(c: &ResolvedConnection) -> AppResult<ConnectionOverview> {
+    let mut client = connect(c).await?;
+
+    let meta_rows = client
+        .query(
+            "SELECT @@VERSION,
+                    DB_NAME(),
+                    SUSER_SNAME(),
+                    CONVERT(varchar(33), SYSUTCDATETIME(), 126),
+                    DATEDIFF(SECOND, sqlserver_start_time, SYSUTCDATETIME())
+             FROM sys.dm_os_sys_info",
+            &[],
+        )
+        .await?
+        .into_first_result()
+        .await?;
+
+    let (server_version, current_database, current_user, server_time, uptime_seconds) =
+        if let Some(row) = meta_rows.first() {
+            let version: Option<String> = row.get::<&str, _>(0).map(String::from);
+            let cur_db: Option<String> = row.get::<&str, _>(1).map(String::from);
+            let cur_user: Option<String> = row.get::<&str, _>(2).map(String::from);
+            let s_time: Option<String> = row.get::<&str, _>(3).map(String::from);
+            let up: Option<i32> = row.get::<i32, _>(4);
+            (version, cur_db, cur_user, s_time, up)
+        } else {
+            (None, None, None, None, None)
+        };
+
+    let db_rows = client
+        .query(
+            "SELECT d.name,
+                    SUM(CAST(f.size AS BIGINT)) * 8192,
+                    CASE WHEN d.database_id <= 4 THEN 1 ELSE 0 END
+             FROM sys.databases d
+             LEFT JOIN sys.master_files f ON f.database_id = d.database_id
+             GROUP BY d.name, d.database_id
+             ORDER BY d.name",
+            &[],
+        )
+        .await?
+        .into_first_result()
+        .await?;
+
+    let active: Option<i32> = match client
+        .query(
+            "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1",
+            &[],
+        )
+        .await
+    {
+        Ok(stream) => stream
+            .into_first_result()
+            .await
+            .ok()
+            .and_then(|rows| rows.first().and_then(|r| r.get::<i32, _>(0))),
+        Err(_) => None,
+    };
+
+    let mut databases = Vec::with_capacity(db_rows.len());
+    let mut total: u64 = 0;
+    for row in db_rows {
+        let name: String = row.get::<&str, _>(0).unwrap_or("").to_string();
+        let size: Option<i64> = row.get::<i64, _>(1);
+        let is_system_flag: i32 = row.get::<i32, _>(2).unwrap_or(0);
+        let size_bytes = size.and_then(|s| if s > 0 { Some(s as u64) } else { None });
+        if let Some(s) = size_bytes {
+            total = total.saturating_add(s);
+        }
+        databases.push(DatabaseSummary {
+            name,
+            is_system: is_system_flag == 1,
+            size_bytes,
+            relation_count: None,
+            details: None,
+        });
+    }
+
+    Ok(ConnectionOverview {
+        driver: "mssql".to_string(),
+        server_version,
+        current_database,
+        current_user,
+        server_time,
+        uptime_seconds: uptime_seconds.and_then(|v| if v >= 0 { Some(v as u64) } else { None }),
+        total_size_bytes: if total > 0 { Some(total) } else { None },
+        active_connections: active.and_then(|v| if v >= 0 { Some(v as u64) } else { None }),
+        max_connections: None,
+        databases,
+    })
 }
 
 pub async fn describe_table(

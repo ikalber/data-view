@@ -1,7 +1,8 @@
 use crate::error::AppResult;
 use crate::model::{
-    ColumnInfo, PageOptions, QueryResult, QueryResultColumn, RelationInfo, RelationKind,
-    ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult, QUERY_LIMIT,
+    ColumnInfo, ConnectionOverview, DatabaseSummary, PageOptions, QueryResult, QueryResultColumn,
+    RelationInfo, RelationKind, ResolvedConnection, SchemaInfo, TableDetails, TestConnectionResult,
+    QUERY_LIMIT,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -96,6 +97,89 @@ pub async fn list_relations(
         });
     }
     Ok(out)
+}
+
+pub async fn get_connection_overview(c: &ResolvedConnection) -> AppResult<ConnectionOverview> {
+    let client = connect(c).await?;
+    let meta = client
+        .query_one(
+            "SELECT version(),
+                    current_database(),
+                    current_user::text,
+                    now()::text,
+                    EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint",
+            &[],
+        )
+        .await?;
+    let server_version: Option<String> = meta.try_get(0).ok();
+    let current_database: Option<String> = meta.try_get(1).ok();
+    let current_user: Option<String> = meta.try_get(2).ok();
+    let server_time: Option<String> = meta.try_get(3).ok();
+    let uptime_seconds: Option<i64> = meta.try_get(4).ok();
+
+    let db_rows = client
+        .query(
+            "SELECT d.datname,
+                    CASE WHEN has_database_privilege(d.datname, 'CONNECT')
+                         THEN pg_database_size(d.datname) END,
+                    d.datistemplate
+             FROM pg_database d
+             WHERE NOT d.datistemplate OR d.datname IN ('template0', 'template1')
+             ORDER BY d.datname",
+            &[],
+        )
+        .await?;
+
+    let active: Option<i64> = client
+        .query_one(
+            "SELECT count(*)::bigint FROM pg_stat_activity WHERE state IS NOT NULL",
+            &[],
+        )
+        .await
+        .ok()
+        .and_then(|r| r.try_get(0).ok());
+
+    let max_conn: Option<i64> = client
+        .query_one(
+            "SELECT setting::bigint FROM pg_settings WHERE name = 'max_connections'",
+            &[],
+        )
+        .await
+        .ok()
+        .and_then(|r| r.try_get(0).ok());
+
+    let mut databases = Vec::with_capacity(db_rows.len());
+    let mut total_size: u64 = 0;
+    for row in db_rows {
+        let name: String = row.get(0);
+        let size: Option<i64> = row.try_get(1).ok();
+        let is_template: bool = row.try_get(2).unwrap_or(false);
+        let size_bytes = size.and_then(|s| if s >= 0 { Some(s as u64) } else { None });
+        if let Some(s) = size_bytes {
+            total_size = total_size.saturating_add(s);
+        }
+        let is_system = is_template || name == "postgres";
+        databases.push(DatabaseSummary {
+            name,
+            is_system,
+            size_bytes,
+            relation_count: None,
+            details: None,
+        });
+    }
+
+    Ok(ConnectionOverview {
+        driver: "postgres".to_string(),
+        server_version,
+        current_database,
+        current_user,
+        server_time,
+        uptime_seconds: uptime_seconds.and_then(|v| if v >= 0 { Some(v as u64) } else { None }),
+        total_size_bytes: if total_size > 0 { Some(total_size) } else { None },
+        active_connections: active.and_then(|v| if v >= 0 { Some(v as u64) } else { None }),
+        max_connections: max_conn.and_then(|v| if v >= 0 { Some(v as u64) } else { None }),
+        databases,
+    })
 }
 
 pub async fn describe_table(
