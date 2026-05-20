@@ -286,12 +286,62 @@ pub struct CreateTableColumn {
     pub default: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTableForeignKey {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    #[serde(default)]
+    pub on_update: Option<String>,
+    #[serde(default)]
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTableIndex {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTableOptions {
     pub schema: String,
     pub name: String,
     pub columns: Vec<CreateTableColumn>,
+    #[serde(default)]
+    pub foreign_keys: Vec<CreateTableForeignKey>,
+    #[serde(default)]
+    pub indexes: Vec<CreateTableIndex>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIndexOptions {
+    pub schema: String,
+    pub table: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropIndexOptions {
+    pub schema: String,
+    #[serde(default)]
+    pub table: Option<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

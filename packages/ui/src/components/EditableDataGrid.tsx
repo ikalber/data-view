@@ -14,6 +14,7 @@ import type {
   ColumnInfo,
   QueryResult,
 } from "@data-view/core";
+import { CellViewerModal } from "./CellViewerModal";
 
 export type SortState = {
   column: string;
@@ -134,6 +135,13 @@ export function EditableDataGrid({
   const [editing, setEditing] = useState<EditingCell | null>(null);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
+  // Right-click on a cell opens the cell viewer (JSON pretty-print, blob
+  // info, long-text expansion). Double-click stays reserved for editing.
+  const [inspecting, setInspecting] = useState<{
+    columnName: string;
+    dataType?: string;
+    value: CellValue;
+  } | null>(null);
 
   // Focus & select the input when entering edit mode.
   useEffect(() => {
@@ -380,6 +388,7 @@ export function EditableDataGrid({
   const showRowNumberCol = pkColumns.length > 0 || (newRows && newRows.length > 0);
 
   return (
+    <>
     <table className="dv-table" role="grid">
       <thead>
         <tr>
@@ -446,14 +455,25 @@ export function EditableDataGrid({
                       if (readonly || !pkKey) return;
                       startEdit(pkKey, c.name, display);
                     }}
+                    onContextMenu={(e) => {
+                      // Right-click → inspect the original (non-dirty) cell
+                      // value in the CellViewerModal. We pass the raw cell so
+                      // JSON detection and binary handling work correctly.
+                      e.preventDefault();
+                      setInspecting({
+                        columnName: c.name,
+                        dataType: colInfo?.dataType ?? c.dataType,
+                        value: row[colNameToIdx.get(c.name) ?? -1] ?? null,
+                      });
+                    }}
                     title={
                       readonly
                         ? colInfo?.isPrimaryKey
-                          ? "PK — no editable"
+                          ? "PK — no editable · clic derecho para inspeccionar"
                           : !pkKey
-                          ? "Tabla sin PK — no editable"
-                          : "No editable"
-                        : `${c.name}${colInfo ? ` · ${colInfo.dataType}` : ""}`
+                          ? "Tabla sin PK — no editable · clic derecho para inspeccionar"
+                          : "No editable · clic derecho para inspeccionar"
+                        : `${c.name}${colInfo ? ` · ${colInfo.dataType}` : ""} · clic derecho para inspeccionar`
                     }
                   >
                     {isEditing && pkKey ? (
@@ -583,6 +603,15 @@ export function EditableDataGrid({
         })}
       </tbody>
     </table>
+    {inspecting && (
+      <CellViewerModal
+        columnName={inspecting.columnName}
+        dataType={inspecting.dataType}
+        value={inspecting.value}
+        onClose={() => setInspecting(null)}
+      />
+    )}
+    </>
   );
 }
 

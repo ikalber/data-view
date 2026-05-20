@@ -120,6 +120,18 @@ export interface Transport {
     name: string,
     options?: DropOptions,
   ): Promise<void>;
+
+  /** Create a secondary index on an existing table. */
+  createIndex(
+    connectionId: string,
+    options: CreateIndexOptions,
+  ): Promise<void>;
+
+  /** Drop a secondary index. */
+  dropIndex(
+    connectionId: string,
+    options: DropIndexOptions,
+  ): Promise<void>;
 }
 
 export interface DropOptions {
@@ -150,10 +162,54 @@ export interface CreateTableColumn {
   default?: string | null;
 }
 
+export interface CreateTableForeignKey {
+  /** Optional explicit constraint name. When omitted the driver picks one. */
+  name?: string;
+  /** Columns of the new table that point to the referenced table. */
+  columns: string[];
+  /** Schema of the referenced table. */
+  referencedSchema: string;
+  /** Referenced table name. */
+  referencedTable: string;
+  /** Column(s) on the referenced table — must match `columns.length`. */
+  referencedColumns: string[];
+  /** `RESTRICT` | `CASCADE` | `SET NULL` | `SET DEFAULT` | `NO ACTION`. */
+  onUpdate?: string;
+  onDelete?: string;
+}
+
+export interface CreateTableIndex {
+  /** Optional explicit index name. When omitted the driver auto-generates one. */
+  name?: string;
+  columns: string[];
+  unique?: boolean;
+}
+
 export interface CreateTableOptions {
   schema: string;
   name: string;
   columns: CreateTableColumn[];
+  /** Foreign-key constraints emitted inline in the CREATE TABLE statement. */
+  foreignKeys?: CreateTableForeignKey[];
+  /** Secondary indexes created with separate CREATE INDEX statements right
+   * after the table itself. */
+  indexes?: CreateTableIndex[];
+}
+
+export interface CreateIndexOptions {
+  schema: string;
+  table: string;
+  name?: string;
+  columns: string[];
+  unique?: boolean;
+}
+
+export interface DropIndexOptions {
+  schema: string;
+  /** Table the index belongs to. Needed by MySQL (`ALTER TABLE … DROP INDEX`)
+   * but ignored by Postgres / SQL Server which use a global namespace. */
+  table?: string;
+  name: string;
 }
 
 export interface RunQueryOptions {

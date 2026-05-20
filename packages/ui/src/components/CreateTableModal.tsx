@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type {
   ConnectionConfig,
   CreateTableColumn,
+  CreateTableForeignKey,
+  CreateTableIndex,
   DatabaseDriver,
   SchemaInfo,
 } from "@data-view/core";
@@ -225,6 +227,68 @@ function defaultParamsFor(option: TypeOption | null): string[] {
   return option?.params?.map((p) => p.default) ?? [];
 }
 
+interface FkDraft {
+  uid: string;
+  name: string;
+  /** Local columns on the new table — comma-separated names. */
+  columns: string;
+  referencedSchema: string;
+  referencedTable: string;
+  /** Comma-separated; must match the number of local columns. */
+  referencedColumns: string;
+  /** ON UPDATE action; empty string means "don't emit clause". */
+  onUpdate: string;
+  /** ON DELETE action; empty string means "don't emit clause". */
+  onDelete: string;
+}
+
+interface IndexDraft {
+  uid: string;
+  /** Optional explicit name; when empty the adapter auto-generates one. */
+  name: string;
+  /** Comma-separated column names. */
+  columns: string;
+  unique: boolean;
+}
+
+const FK_ACTIONS = [
+  "",
+  "CASCADE",
+  "RESTRICT",
+  "SET NULL",
+  "SET DEFAULT",
+  "NO ACTION",
+] as const;
+
+function blankFk(defaultRefSchema: string): FkDraft {
+  return {
+    uid: uid(),
+    name: "",
+    columns: "",
+    referencedSchema: defaultRefSchema,
+    referencedTable: "",
+    referencedColumns: "",
+    onUpdate: "",
+    onDelete: "",
+  };
+}
+
+function blankIndex(): IndexDraft {
+  return {
+    uid: uid(),
+    name: "",
+    columns: "",
+    unique: false,
+  };
+}
+
+function parseCommaList(s: string): string[] {
+  return s
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
+
 interface DraftColumn {
   /** Stable id so the row inputs aren't re-mounted on reorder. */
   uid: string;
@@ -356,8 +420,31 @@ export function CreateTableModal({
   const [columns, setColumns] = useState<DraftColumn[]>(() => [
     defaultIdColumn(driver),
   ]);
+  const [foreignKeys, setForeignKeys] = useState<FkDraft[]>([]);
+  const [indexes, setIndexes] = useState<IndexDraft[]>([]);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Tables visible to the user, grouped by schema, used by the FK editor's
+  // "referenced table" dropdown. Fetched on-demand per schema as the user
+  // picks one.
+  const [tablesByRefSchema, setTablesByRefSchema] = useState<
+    Record<string, string[]>
+  >({});
+
+  async function ensureTablesFor(schema: string) {
+    if (tablesByRefSchema[schema] || !schema.trim()) return;
+    try {
+      const rels = await transport.listRelations(connection.id, schema);
+      setTablesByRefSchema((prev) => ({
+        ...prev,
+        [schema]: rels.map((r) => r.name),
+      }));
+    } catch {
+      setTablesByRefSchema((prev) => ({ ...prev, [schema]: [] }));
+    }
+  }
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -435,6 +522,54 @@ export function CreateTableModal({
         default: c.default?.trim() || null,
       });
     }
+    // Resolve FKs.
+    const resolvedFks: CreateTableForeignKey[] = [];
+    for (const fk of foreignKeys) {
+      const localCols = parseCommaList(fk.columns);
+      const refCols = parseCommaList(fk.referencedColumns);
+      if (localCols.length === 0 && refCols.length === 0 && !fk.referencedTable.trim()) {
+        continue; // skip empty rows silently
+      }
+      if (localCols.length === 0) {
+        setError("Un FK no tiene columnas locales");
+        return;
+      }
+      if (!fk.referencedTable.trim()) {
+        setError("Un FK no tiene tabla referenciada");
+        return;
+      }
+      if (localCols.length !== refCols.length) {
+        setError(
+          `FK "${fk.referencedTable}": ${localCols.length} columnas locales pero ${refCols.length} referenciadas`,
+        );
+        return;
+      }
+      resolvedFks.push({
+        name: fk.name.trim() || undefined,
+        columns: localCols,
+        referencedSchema: fk.referencedSchema.trim() || schemaName.trim(),
+        referencedTable: fk.referencedTable.trim(),
+        referencedColumns: refCols,
+        onUpdate: fk.onUpdate || undefined,
+        onDelete: fk.onDelete || undefined,
+      });
+    }
+    // Resolve indexes.
+    const resolvedIdxs: CreateTableIndex[] = [];
+    for (const idx of indexes) {
+      const cols = parseCommaList(idx.columns);
+      if (cols.length === 0 && !idx.name.trim()) continue;
+      if (cols.length === 0) {
+        setError(`El índice "${idx.name || "(sin nombre)"}" no tiene columnas`);
+        return;
+      }
+      resolvedIdxs.push({
+        name: idx.name.trim() || undefined,
+        columns: cols,
+        unique: idx.unique,
+      });
+    }
+
     setRunning(true);
     setError(null);
     try {
@@ -442,6 +577,8 @@ export function CreateTableModal({
         schema: schemaName.trim(),
         name: tableName.trim(),
         columns: resolved,
+        foreignKeys: resolvedFks.length > 0 ? resolvedFks : undefined,
+        indexes: resolvedIdxs.length > 0 ? resolvedIdxs : undefined,
       });
       onCreated({ schema: schemaName.trim(), name: tableName.trim() });
     } catch (e) {
@@ -686,6 +823,468 @@ export function CreateTableModal({
               ))}
             </tbody>
           </table>
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((o) => !o)}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              cursor: "pointer",
+              color: "var(--dv-text-dim)",
+              fontSize: 12,
+              fontFamily: "inherit",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+            disabled={running}
+          >
+            <span>{advancedOpen ? "▾" : "▸"}</span>
+            <span>
+              Avanzado · FKs ({foreignKeys.length}) · índices ({indexes.length})
+            </span>
+          </button>
+
+          {advancedOpen && (
+            <div style={{ marginTop: 8, display: "grid", gap: 16 }}>
+              {/* ── Foreign keys ────────────────────────────────────────── */}
+              <div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    fontSize: 12,
+                    color: "var(--dv-text-dim)",
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>Foreign keys</span>
+                  <button
+                    type="button"
+                    className="dv-button is-sm"
+                    disabled={running}
+                    onClick={() =>
+                      setForeignKeys((prev) => [
+                        ...prev,
+                        blankFk(schemaName),
+                      ])
+                    }
+                  >
+                    + FK
+                  </button>
+                </div>
+                {foreignKeys.length === 0 ? (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--dv-text-mute)",
+                      fontStyle: "italic",
+                      padding: "8px 4px",
+                    }}
+                  >
+                    Sin foreign keys.
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      border: "1px solid var(--dv-border)",
+                      borderRadius: 6,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <table
+                      style={{
+                        width: "100%",
+                        fontSize: 12,
+                        borderCollapse: "collapse",
+                      }}
+                    >
+                      <thead>
+                        <tr
+                          style={{
+                            background: "var(--dv-surface-2)",
+                            textAlign: "left",
+                          }}
+                        >
+                          <th style={{ padding: "6px 8px", width: "18%" }}>
+                            Local cols
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "14%" }}>
+                            Ref. schema
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "18%" }}>
+                            Ref. tabla
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "18%" }}>
+                            Ref. cols
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "12%" }}>
+                            ON UPDATE
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "12%" }}>
+                            ON DELETE
+                          </th>
+                          <th style={{ padding: "6px 8px", width: 40 }} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {foreignKeys.map((fk, i) => (
+                          <tr
+                            key={fk.uid}
+                            style={{ borderTop: "1px solid var(--dv-border)" }}
+                          >
+                            <td style={{ padding: 4 }}>
+                              <input
+                                type="text"
+                                className="dv-input"
+                                value={fk.columns}
+                                onChange={(e) =>
+                                  setForeignKeys((prev) =>
+                                    prev.map((f, idx) =>
+                                      idx === i
+                                        ? { ...f, columns: e.target.value }
+                                        : f,
+                                    ),
+                                  )
+                                }
+                                placeholder="col1, col2"
+                                disabled={running}
+                                spellCheck={false}
+                              />
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              <select
+                                className="dv-input"
+                                value={fk.referencedSchema}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setForeignKeys((prev) =>
+                                    prev.map((f, idx) =>
+                                      idx === i
+                                        ? { ...f, referencedSchema: v }
+                                        : f,
+                                    ),
+                                  );
+                                  void ensureTablesFor(v);
+                                }}
+                                disabled={running}
+                              >
+                                {userSchemas.map((s) => (
+                                  <option key={s.name} value={s.name}>
+                                    {s.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              {(tablesByRefSchema[fk.referencedSchema] ?? [])
+                                .length > 0 ? (
+                                <select
+                                  className="dv-input"
+                                  value={fk.referencedTable}
+                                  onChange={(e) =>
+                                    setForeignKeys((prev) =>
+                                      prev.map((f, idx) =>
+                                        idx === i
+                                          ? { ...f, referencedTable: e.target.value }
+                                          : f,
+                                      ),
+                                    )
+                                  }
+                                  disabled={running}
+                                >
+                                  <option value="">—</option>
+                                  {tablesByRefSchema[fk.referencedSchema]!.map(
+                                    (t) => (
+                                      <option key={t} value={t}>
+                                        {t}
+                                      </option>
+                                    ),
+                                  )}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  className="dv-input"
+                                  value={fk.referencedTable}
+                                  onChange={(e) =>
+                                    setForeignKeys((prev) =>
+                                      prev.map((f, idx) =>
+                                        idx === i
+                                          ? { ...f, referencedTable: e.target.value }
+                                          : f,
+                                      ),
+                                    )
+                                  }
+                                  onFocus={() =>
+                                    ensureTablesFor(fk.referencedSchema)
+                                  }
+                                  placeholder="tabla"
+                                  disabled={running}
+                                  spellCheck={false}
+                                />
+                              )}
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              <input
+                                type="text"
+                                className="dv-input"
+                                value={fk.referencedColumns}
+                                onChange={(e) =>
+                                  setForeignKeys((prev) =>
+                                    prev.map((f, idx) =>
+                                      idx === i
+                                        ? {
+                                            ...f,
+                                            referencedColumns: e.target.value,
+                                          }
+                                        : f,
+                                    ),
+                                  )
+                                }
+                                placeholder="id"
+                                disabled={running}
+                                spellCheck={false}
+                              />
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              <select
+                                className="dv-input"
+                                value={fk.onUpdate}
+                                onChange={(e) =>
+                                  setForeignKeys((prev) =>
+                                    prev.map((f, idx) =>
+                                      idx === i
+                                        ? { ...f, onUpdate: e.target.value }
+                                        : f,
+                                    ),
+                                  )
+                                }
+                                disabled={running}
+                              >
+                                {FK_ACTIONS.map((a) => (
+                                  <option key={a || "_none"} value={a}>
+                                    {a || "—"}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              <select
+                                className="dv-input"
+                                value={fk.onDelete}
+                                onChange={(e) =>
+                                  setForeignKeys((prev) =>
+                                    prev.map((f, idx) =>
+                                      idx === i
+                                        ? { ...f, onDelete: e.target.value }
+                                        : f,
+                                    ),
+                                  )
+                                }
+                                disabled={running}
+                              >
+                                {FK_ACTIONS.map((a) => (
+                                  <option key={a || "_none"} value={a}>
+                                    {a || "—"}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td style={{ padding: 4, textAlign: "center" }}>
+                              <button
+                                type="button"
+                                className="dv-button is-sm"
+                                onClick={() =>
+                                  setForeignKeys((prev) =>
+                                    prev.filter((_, idx) => idx !== i),
+                                  )
+                                }
+                                disabled={running}
+                                title="Borrar FK"
+                                style={{ padding: "2px 6px" }}
+                              >
+                                ✕
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Indexes ─────────────────────────────────────────────── */}
+              <div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    fontSize: 12,
+                    color: "var(--dv-text-dim)",
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>Índices</span>
+                  <button
+                    type="button"
+                    className="dv-button is-sm"
+                    disabled={running}
+                    onClick={() =>
+                      setIndexes((prev) => [...prev, blankIndex()])
+                    }
+                  >
+                    + Índice
+                  </button>
+                </div>
+                {indexes.length === 0 ? (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--dv-text-mute)",
+                      fontStyle: "italic",
+                      padding: "8px 4px",
+                    }}
+                  >
+                    Sin índices secundarios.
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      border: "1px solid var(--dv-border)",
+                      borderRadius: 6,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <table
+                      style={{
+                        width: "100%",
+                        fontSize: 12,
+                        borderCollapse: "collapse",
+                      }}
+                    >
+                      <thead>
+                        <tr
+                          style={{
+                            background: "var(--dv-surface-2)",
+                            textAlign: "left",
+                          }}
+                        >
+                          <th style={{ padding: "6px 8px", width: "28%" }}>
+                            Nombre
+                          </th>
+                          <th style={{ padding: "6px 8px", width: "52%" }}>
+                            Columnas
+                          </th>
+                          <th
+                            style={{
+                              padding: "6px 8px",
+                              width: 70,
+                              textAlign: "center",
+                            }}
+                          >
+                            UNIQUE
+                          </th>
+                          <th style={{ padding: "6px 8px", width: 40 }} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {indexes.map((idx, i) => (
+                          <tr
+                            key={idx.uid}
+                            style={{ borderTop: "1px solid var(--dv-border)" }}
+                          >
+                            <td style={{ padding: 4 }}>
+                              <input
+                                type="text"
+                                className="dv-input"
+                                value={idx.name}
+                                onChange={(e) =>
+                                  setIndexes((prev) =>
+                                    prev.map((it, j) =>
+                                      j === i
+                                        ? { ...it, name: e.target.value }
+                                        : it,
+                                    ),
+                                  )
+                                }
+                                placeholder="(auto)"
+                                disabled={running}
+                                spellCheck={false}
+                              />
+                            </td>
+                            <td style={{ padding: 4 }}>
+                              <input
+                                type="text"
+                                className="dv-input"
+                                value={idx.columns}
+                                onChange={(e) =>
+                                  setIndexes((prev) =>
+                                    prev.map((it, j) =>
+                                      j === i
+                                        ? { ...it, columns: e.target.value }
+                                        : it,
+                                    ),
+                                  )
+                                }
+                                placeholder="col1, col2"
+                                disabled={running}
+                                spellCheck={false}
+                              />
+                            </td>
+                            <td
+                              style={{
+                                padding: 4,
+                                textAlign: "center",
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={idx.unique}
+                                onChange={(e) =>
+                                  setIndexes((prev) =>
+                                    prev.map((it, j) =>
+                                      j === i
+                                        ? { ...it, unique: e.target.checked }
+                                        : it,
+                                    ),
+                                  )
+                                }
+                                disabled={running}
+                              />
+                            </td>
+                            <td style={{ padding: 4, textAlign: "center" }}>
+                              <button
+                                type="button"
+                                className="dv-button is-sm"
+                                onClick={() =>
+                                  setIndexes((prev) =>
+                                    prev.filter((_, j) => j !== i),
+                                  )
+                                }
+                                disabled={running}
+                                title="Borrar índice"
+                                style={{ padding: "2px 6px" }}
+                              >
+                                ✕
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && (

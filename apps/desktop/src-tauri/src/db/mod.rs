@@ -4,9 +4,10 @@ pub mod mssql;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    ConnectionOverview, CreateSchemaOptions, CreateTableColumn, CreateTableOptions, DriverKind,
-    DropOptions, PageOptions, QueryResult, RelationInfo, ResolvedConnection, SchemaInfo,
-    TableDetails, TestConnectionResult,
+    ConnectionOverview, CreateIndexOptions, CreateSchemaOptions, CreateTableColumn,
+    CreateTableForeignKey, CreateTableOptions, DriverKind, DropIndexOptions, DropOptions,
+    PageOptions, QueryResult, RelationInfo, ResolvedConnection, SchemaInfo, TableDetails,
+    TestConnectionResult,
 };
 
 pub async fn test(conn: &ResolvedConnection) -> AppResult<TestConnectionResult> {
@@ -121,7 +122,120 @@ pub async fn create_table(
     if options.columns.is_empty() {
         return Err(AppError::msg("Agregá al menos una columna"));
     }
-    let sql = build_create_table_sql(conn.driver.clone(), &options.schema, &options.name, &options.columns)?;
+    let sql = build_create_table_sql(
+        conn.driver.clone(),
+        &options.schema,
+        &options.name,
+        &options.columns,
+        &options.foreign_keys,
+    )?;
+    run_query(conn, &sql).await.map(|_| ())?;
+    for idx in options.indexes.iter() {
+        create_index_inner(
+            conn,
+            &options.schema,
+            &options.name,
+            idx.name.as_deref(),
+            &idx.columns,
+            idx.unique,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn create_index(
+    conn: &ResolvedConnection,
+    options: &CreateIndexOptions,
+) -> AppResult<()> {
+    create_index_inner(
+        conn,
+        &options.schema,
+        &options.table,
+        options.name.as_deref(),
+        &options.columns,
+        options.unique,
+    )
+    .await
+}
+
+async fn create_index_inner(
+    conn: &ResolvedConnection,
+    schema: &str,
+    table: &str,
+    name: Option<&str>,
+    columns: &[String],
+    unique: bool,
+) -> AppResult<()> {
+    if table.trim().is_empty() {
+        return Err(AppError::msg("table requerido"));
+    }
+    if columns.is_empty() {
+        return Err(AppError::msg("Agregá al menos una columna al índice"));
+    }
+    let idfn: fn(&str) -> String = match conn.driver {
+        DriverKind::Postgres => pg_ident,
+        DriverKind::Mysql => my_ident,
+        DriverKind::Mssql => ms_ident,
+    };
+    let auto = format!("idx_{}_{}", table, columns.join("_"));
+    let idx_name = idfn(name.unwrap_or(&auto));
+    let fq_table = format!("{}.{}", idfn(schema), idfn(table));
+    let cols = columns
+        .iter()
+        .map(|c| idfn(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let unique_kw = if unique { "UNIQUE " } else { "" };
+    let if_not_exists = match conn.driver {
+        // Only Postgres accepts IF NOT EXISTS on CREATE INDEX.
+        DriverKind::Postgres => "IF NOT EXISTS ",
+        _ => "",
+    };
+    let sql = format!(
+        "CREATE {}INDEX {}{} ON {} ({})",
+        unique_kw, if_not_exists, idx_name, fq_table, cols
+    );
+    run_query(conn, &sql).await.map(|_| ())
+}
+
+pub async fn drop_index(
+    conn: &ResolvedConnection,
+    options: &DropIndexOptions,
+) -> AppResult<()> {
+    let idfn: fn(&str) -> String = match conn.driver {
+        DriverKind::Postgres => pg_ident,
+        DriverKind::Mysql => my_ident,
+        DriverKind::Mssql => ms_ident,
+    };
+    let sql = match conn.driver {
+        DriverKind::Postgres => {
+            let fqn = format!("{}.{}", idfn(&options.schema), idfn(&options.name));
+            format!("DROP INDEX IF EXISTS {}", fqn)
+        }
+        DriverKind::Mysql => {
+            let table = options.table.as_deref().ok_or_else(|| {
+                AppError::msg("MySQL: dropIndex requiere `table`")
+            })?;
+            format!(
+                "ALTER TABLE {}.{} DROP INDEX {}",
+                idfn(&options.schema),
+                idfn(table),
+                idfn(&options.name)
+            )
+        }
+        DriverKind::Mssql => {
+            let table = options.table.as_deref().ok_or_else(|| {
+                AppError::msg("SQL Server: dropIndex requiere `table`")
+            })?;
+            format!(
+                "DROP INDEX {} ON {}.{}",
+                idfn(&options.name),
+                idfn(&options.schema),
+                idfn(table)
+            )
+        }
+    };
     run_query(conn, &sql).await.map(|_| ())
 }
 
@@ -130,6 +244,7 @@ fn build_create_table_sql(
     schema: &str,
     name: &str,
     columns: &[CreateTableColumn],
+    foreign_keys: &[CreateTableForeignKey],
 ) -> AppResult<String> {
     let (ident_fn, nullable_keyword): (fn(&str) -> String, fn(bool) -> &'static str) = match driver {
         DriverKind::Postgres => (
@@ -172,11 +287,61 @@ fn build_create_table_sql(
     if !pk_cols.is_empty() {
         col_lines.push(format!("  PRIMARY KEY ({})", pk_cols.join(", ")));
     }
+    for fk in foreign_keys {
+        col_lines.push(format!("  {}", render_fk_clause(ident_fn, fk)?));
+    }
     Ok(format!(
         "CREATE TABLE {}.{} (\n{}\n);",
         ident_fn(schema),
         ident_fn(name),
         col_lines.join(",\n")
+    ))
+}
+
+fn render_fk_clause(
+    ident_fn: fn(&str) -> String,
+    fk: &CreateTableForeignKey,
+) -> AppResult<String> {
+    if fk.columns.is_empty() {
+        return Err(AppError::msg("FK sin columnas locales"));
+    }
+    if fk.referenced_columns.len() != fk.columns.len() {
+        return Err(AppError::msg(format!(
+            "FK: columnas ({}) ≠ referencedColumns ({})",
+            fk.columns.len(),
+            fk.referenced_columns.len()
+        )));
+    }
+    let cols = fk.columns.iter().map(|c| ident_fn(c)).collect::<Vec<_>>().join(", ");
+    let ref_cols = fk
+        .referenced_columns
+        .iter()
+        .map(|c| ident_fn(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ref_table = format!(
+        "{}.{}",
+        ident_fn(&fk.referenced_schema),
+        ident_fn(&fk.referenced_table)
+    );
+    let prefix = match &fk.name {
+        Some(n) if !n.is_empty() => format!("CONSTRAINT {} ", ident_fn(n)),
+        _ => String::new(),
+    };
+    let mut tail = String::new();
+    if let Some(on_update) = &fk.on_update {
+        if !on_update.is_empty() {
+            tail.push_str(&format!(" ON UPDATE {}", on_update));
+        }
+    }
+    if let Some(on_delete) = &fk.on_delete {
+        if !on_delete.is_empty() {
+            tail.push_str(&format!(" ON DELETE {}", on_delete));
+        }
+    }
+    Ok(format!(
+        "{}FOREIGN KEY ({}) REFERENCES {} ({}){}",
+        prefix, cols, ref_table, ref_cols, tail
     ))
 }
 

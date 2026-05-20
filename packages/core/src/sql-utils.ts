@@ -39,6 +39,48 @@ export function quoteString(text: string): string {
   return "'" + text.replace(/'/g, "''") + "'";
 }
 
+/** Build the column-level CONSTRAINT clause for a CREATE TABLE foreign key.
+ * Driver-portable — only the identifier quoting style differs. */
+export function renderForeignKeyClause(
+  driver: DatabaseDriver,
+  fk: {
+    name?: string;
+    columns: string[];
+    referencedSchema: string;
+    referencedTable: string;
+    referencedColumns: string[];
+    onUpdate?: string;
+    onDelete?: string;
+  },
+): string {
+  if (fk.columns.length === 0) throw new Error("FK sin columnas locales");
+  if (fk.referencedColumns.length !== fk.columns.length) {
+    throw new Error(
+      `FK: cantidad de columnas (${fk.columns.length}) ≠ referencedColumns (${fk.referencedColumns.length})`,
+    );
+  }
+  const cols = fk.columns.map((c) => quoteIdent(driver, c)).join(", ");
+  const refCols = fk.referencedColumns
+    .map((c) => quoteIdent(driver, c))
+    .join(", ");
+  const refTable = `${quoteIdent(driver, fk.referencedSchema)}.${quoteIdent(
+    driver,
+    fk.referencedTable,
+  )}`;
+  const prefix = fk.name ? `CONSTRAINT ${quoteIdent(driver, fk.name)} ` : "";
+  const tail: string[] = [];
+  if (fk.onUpdate) tail.push(`ON UPDATE ${fk.onUpdate}`);
+  if (fk.onDelete) tail.push(`ON DELETE ${fk.onDelete}`);
+  const tailStr = tail.length ? " " + tail.join(" ") : "";
+  return `${prefix}FOREIGN KEY (${cols}) REFERENCES ${refTable} (${refCols})${tailStr}`;
+}
+
+/** Suggest an auto index name from table + columns, capped at 60 chars
+ * (Postgres' default identifier limit is 63). */
+export function autoIndexName(table: string, columns: string[]): string {
+  return `idx_${table}_${columns.join("_")}`.slice(0, 60);
+}
+
 /** Minimal column descriptor used by the generate-SQL helpers below. We don't
  * take the full `ColumnInfo` since callers (UI dropdown, tests) typically
  * only have name + nullability handy. */

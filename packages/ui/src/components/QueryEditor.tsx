@@ -14,7 +14,7 @@ import { useTransport } from "../transport-context";
 import { recordHistoryEntry } from "../query-history";
 import { ResultsTable } from "./ResultsTable";
 import { ExportMenu } from "./ExportMenu";
-import { SqlCodeEditor } from "./SqlCodeEditor";
+import { SqlCodeEditor, type SqlEditorHandle } from "./SqlCodeEditor";
 
 export interface SavedFile {
   id: string;
@@ -99,6 +99,7 @@ export function QueryEditor({
   const [dbFilter, setDbFilter] = useState("");
   const filesMenuRef = useRef<HTMLDivElement>(null);
   const dbMenuRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<SqlEditorHandle>(null);
 
   const dbLabel = driver === "postgres" ? "Schema" : "Database";
   const userSchemas = useMemo(
@@ -171,16 +172,21 @@ export function QueryEditor({
 
   const run = useCallback(async () => {
     if (runtime.running) return;
-    if (!sql.trim()) return;
+    // When the user has a non-empty selection, run only that — lets people
+    // execute a single statement out of a larger script. Falls back to the
+    // whole buffer otherwise.
+    const selection = editorRef.current?.getSelection()?.trim();
+    const text = selection && selection.length > 0 ? selection : sql;
+    if (!text.trim()) return;
     setRuntime((r) => ({ result: r.result, error: null, running: true }));
     try {
-      const result = await transport.runQuery(connectionId, sql, {
+      const result = await transport.runQuery(connectionId, text, {
         schema: database ?? undefined,
       });
       setRuntime({ result, error: null, running: false });
       recordHistoryEntry({
         connectionId,
-        sql,
+        sql: text,
         status: "ok",
         durationMs: result.durationMs,
         rowCount: result.rowCount,
@@ -192,7 +198,7 @@ export function QueryEditor({
       setRuntime({ result: null, error: message, running: false });
       recordHistoryEntry({
         connectionId,
-        sql,
+        sql: text,
         status: "error",
         error: message,
       });
@@ -244,13 +250,16 @@ export function QueryEditor({
   }, [sql, formatterLanguage, onChangeSql]);
 
   const runExplain = useCallback(async () => {
-    if (!sql.trim() || runtime.running) return;
+    if (runtime.running) return;
+    const selection = editorRef.current?.getSelection()?.trim();
+    const source = selection && selection.length > 0 ? selection : sql;
+    if (!source.trim()) return;
     // Strip a leading EXPLAIN if the user already typed one so we don't end
     // up with "EXPLAIN EXPLAIN …". MSSQL uses SET SHOWPLAN_TEXT ON which is
     // session-scoped and doesn't compose cleanly here — we use the same
     // EXPLAIN keyword on all three drivers; on MSSQL it falls back to the
     // server's "Showplan All" approximation via SET SHOWPLAN_ALL.
-    const cleaned = sql.replace(/^\s*explain\s+/i, "").trim();
+    const cleaned = source.replace(/^\s*explain\s+/i, "").trim();
     const wrapped =
       driver === "mssql"
         ? `SET SHOWPLAN_TEXT ON;\n${cleaned}`
@@ -388,6 +397,7 @@ export function QueryEditor({
           className="dv-button is-primary"
           onClick={run}
           disabled={runtime.running}
+          title="Ejecutar la query (si hay texto seleccionado corre solo eso)"
         >
           {runtime.running ? "Ejecutando…" : "Run"}
           <span className="dv-kbd" style={{ marginLeft: 4 }}>
@@ -499,6 +509,7 @@ export function QueryEditor({
       </div>
       <div className="dv-editor">
         <SqlCodeEditor
+          ref={editorRef}
           value={sql}
           onChange={onChangeSql}
           onSubmit={() => void run()}

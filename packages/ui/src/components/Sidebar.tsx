@@ -138,6 +138,7 @@ export function Sidebar({
     Record<string, RelationInfo[]>
   >({});
   const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
+  const [treeSearch, setTreeSearch] = useState("");
   const pickerRef = useRef<HTMLDivElement>(null);
 
   // ── Global tree state (caches survive across renders while the toggle is on)
@@ -840,11 +841,62 @@ export function Sidebar({
                 .
               </div>
             )}
-          {[...userSchemas, ...systemSchemas].map((s) => {
-            const isExpanded = expanded.has(s.name);
+          {connectionId &&
+            !loadingSchemas &&
+            !error &&
+            userSchemas.length + systemSchemas.length > 0 && (
+              <div style={{ padding: "0 10px 8px" }}>
+                <input
+                  type="search"
+                  className="dv-input"
+                  placeholder="Buscar tabla en este connection…"
+                  value={treeSearch}
+                  onChange={(e) => setTreeSearch(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ width: "100%", fontSize: 12, padding: "4px 8px" }}
+                />
+                {treeSearch.trim() && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "var(--dv-text-dim)",
+                      marginTop: 4,
+                    }}
+                  >
+                    Busca en schemas ya expandidos · expandí más para ampliar
+                  </div>
+                )}
+              </div>
+            )}
+          {(() => {
+            const q = treeSearch.trim().toLowerCase();
+            const allSchemas = [...userSchemas, ...systemSchemas];
+            if (!q) return allSchemas;
+            // Schema matches by its own name OR by having a loaded relation
+            // whose name matches the query.
+            return allSchemas.filter((s) => {
+              if (s.name.toLowerCase().includes(q)) return true;
+              const rels = treeRelations[s.name];
+              if (!rels) return false;
+              return rels.some((r) => r.name.toLowerCase().includes(q));
+            });
+          })().map((s) => {
+            const q = treeSearch.trim().toLowerCase();
+            const searchActive = q.length > 0;
+            // When searching: force-expand any schema that's still present
+            // so its matching tables are visible without an extra click.
+            const isExpanded = searchActive || expanded.has(s.name);
             const isActiveSchema = s.name === activeSchema;
             const rels = treeRelations[s.name];
             const loading = loadingSchema === s.name && !rels;
+            const filteredRels = searchActive && rels
+              ? rels.filter(
+                  (r) =>
+                    r.name.toLowerCase().includes(q) ||
+                    s.name.toLowerCase().includes(q),
+                )
+              : rels;
             return (
               <div key={s.name}>
                 <div
@@ -901,10 +953,25 @@ export function Sidebar({
                     {loading && (
                       <div className="dv-schema-tree-loading">cargando…</div>
                     )}
+                    {!loading && !rels && searchActive && (
+                      <div className="dv-schema-tree-loading">
+                        expandí para indexar
+                      </div>
+                    )}
                     {!loading && rels && rels.length === 0 && (
                       <div className="dv-schema-tree-loading">sin tablas</div>
                     )}
-                    {(rels ?? []).map((r) => {
+                    {!loading &&
+                      searchActive &&
+                      rels &&
+                      rels.length > 0 &&
+                      filteredRels &&
+                      filteredRels.length === 0 && (
+                        <div className="dv-schema-tree-loading">
+                          sin coincidencias
+                        </div>
+                      )}
+                    {(filteredRels ?? []).map((r) => {
                       const isActive = isTableActive(r.schema, r.name);
                       return (
                         <div

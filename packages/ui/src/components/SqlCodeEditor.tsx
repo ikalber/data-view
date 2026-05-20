@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { DatabaseDriver, RelationInfo, SchemaInfo } from "@data-view/core";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
@@ -61,7 +68,15 @@ const DARK_VARIANTS = new Set([
   "amber",
 ]);
 
-export function SqlCodeEditor({
+/** Imperative handle exposed to parents (QueryEditor) so they can read the
+ * current text selection — used to implement "Run selection". */
+export interface SqlEditorHandle {
+  /** Returns the currently selected text, or null when nothing is selected. */
+  getSelection: () => string | null;
+  focus: () => void;
+}
+
+export const SqlCodeEditor = forwardRef<SqlEditorHandle, Props>(function SqlCodeEditor({
   value,
   onChange,
   onSubmit,
@@ -71,7 +86,7 @@ export function SqlCodeEditor({
   database,
   connectionId,
   schemas,
-}: Props) {
+}, forwardedRef) {
   const { variant } = useTheme();
   const transport = useTransport();
   const isDark = DARK_VARIANTS.has(variant);
@@ -164,6 +179,23 @@ export function SqlCodeEditor({
     return () => clearTimeout(t);
   }, [autoFocus]);
 
+  useImperativeHandle(
+    forwardedRef,
+    () => ({
+      getSelection: () => {
+        const view = cmRef.current?.view;
+        if (!view) return null;
+        const { from, to } = view.state.selection.main;
+        if (from === to) return null;
+        return view.state.sliceDoc(from, to);
+      },
+      focus: () => {
+        cmRef.current?.view?.focus();
+      },
+    }),
+    [],
+  );
+
   if (!mounted) {
     // Same outer wrapper as the live editor — keeps layout stable so the
     // flash of placeholder doesn't shift the SQL pane on hydration.
@@ -199,4 +231,4 @@ export function SqlCodeEditor({
       />
     </div>
   );
-}
+});

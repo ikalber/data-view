@@ -1,13 +1,20 @@
 import { Client, type ClientConfig } from "pg";
 import type {
   ColumnInfo,
+  CreateIndexOptions,
   CreateSchemaOptions,
   CreateTableColumn,
+  CreateTableForeignKey,
   CreateTableOptions,
+  DropIndexOptions,
   QueryResult,
   QueryResultColumn,
 } from "@data-view/core";
-import { quoteIdent as qiCore } from "@data-view/core";
+import {
+  autoIndexName,
+  quoteIdent as qiCore,
+  renderForeignKeyClause,
+} from "@data-view/core";
 import type {
   DriverAdapter,
   IterateTableOptions,
@@ -392,8 +399,28 @@ export const postgresDriver: DriverAdapter = {
       options.schema,
       options.name,
       options.columns,
+      options.foreignKeys,
     );
     await this.runQuery(c, sqlText);
+    for (const idx of options.indexes ?? []) {
+      await this.createIndex(c, {
+        schema: options.schema,
+        table: options.name,
+        ...idx,
+      });
+    }
+  },
+
+  async createIndex(c, options) {
+    await this.runQuery(c, buildPostgresCreateIndexSql(options));
+  },
+
+  async dropIndex(c, options) {
+    // Postgres indexes live in the same namespace as tables — schema-qualified.
+    const fqn = options.schema
+      ? `${ident(options.schema)}.${ident(options.name)}`
+      : ident(options.name);
+    await this.runQuery(c, `DROP INDEX IF EXISTS ${fqn}`);
   },
 
   async dropTable(c, schema, name, options) {
@@ -443,6 +470,7 @@ function buildPostgresCreateTableFromDraft(
   schema: string,
   name: string,
   columns: CreateTableColumn[],
+  foreignKeys: CreateTableForeignKey[] | undefined,
 ): string {
   if (!schema.trim()) throw new Error("Schema requerido");
   if (!name.trim()) throw new Error("Nombre de tabla requerido");
@@ -461,10 +489,30 @@ function buildPostgresCreateTableFromDraft(
   if (pk.length > 0) {
     colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
   }
+  for (const fk of foreignKeys ?? []) {
+    colLines.push("  " + renderForeignKeyClause("postgres", fk));
+  }
   return `CREATE TABLE ${qiCore("postgres", schema)}.${qiCore(
     "postgres",
     name,
   )} (\n${colLines.join(",\n")}\n);`;
+}
+
+function buildPostgresCreateIndexSql(options: CreateIndexOptions): string {
+  if (!options.table.trim()) throw new Error("table requerido");
+  if (options.columns.length === 0)
+    throw new Error("Agregá al menos una columna al índice");
+  const unique = options.unique ? "UNIQUE " : "";
+  const idxName = (options.name ?? autoIndexName(options.table, options.columns)).trim();
+  const fqTable = `${qiCore("postgres", options.schema)}.${qiCore(
+    "postgres",
+    options.table,
+  )}`;
+  const cols = options.columns.map((c) => qiCore("postgres", c)).join(", ");
+  return `CREATE ${unique}INDEX IF NOT EXISTS ${qiCore(
+    "postgres",
+    idxName,
+  )} ON ${fqTable} (${cols});`;
 }
 
 // Suppress unused-import warning when no helpers reference TableBatch directly.

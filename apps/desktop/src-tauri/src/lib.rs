@@ -39,6 +39,8 @@ pub fn run() {
             commands::drop_table,
             commands::drop_schema,
             commands::truncate_table,
+            commands::create_index,
+            commands::drop_index,
             commands::read_text_file,
         ])
         .run(tauri::generate_context!())

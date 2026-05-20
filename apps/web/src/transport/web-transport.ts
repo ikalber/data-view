@@ -2,8 +2,10 @@ import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  CreateIndexOptions,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropIndexOptions,
   DropOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
@@ -149,6 +151,16 @@ export const webTransport: Transport = {
         name,
         cascade: options?.cascade,
       }),
+    }) as unknown as Promise<void>,
+  createIndex: (connectionId, options: CreateIndexOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/indexes`, {
+      method: "POST",
+      body: JSON.stringify({ action: "create", ...options }),
+    }) as unknown as Promise<void>,
+  dropIndex: (connectionId, options: DropIndexOptions) =>
+    http<{ ok: true }>(`/api/connections/${connectionId}/indexes`, {
+      method: "POST",
+      body: JSON.stringify({ action: "drop", ...options }),
     }) as unknown as Promise<void>,
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const meta = await downloadExport(

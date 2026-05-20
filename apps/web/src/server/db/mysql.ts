@@ -1,13 +1,20 @@
 import mysql from "mysql2/promise";
 import type {
   ColumnInfo,
+  CreateIndexOptions,
   CreateSchemaOptions,
   CreateTableColumn,
+  CreateTableForeignKey,
   CreateTableOptions,
+  DropIndexOptions,
   QueryResult,
   QueryResultColumn,
 } from "@data-view/core";
-import { quoteIdent as qiCore } from "@data-view/core";
+import {
+  autoIndexName,
+  quoteIdent as qiCore,
+  renderForeignKeyClause,
+} from "@data-view/core";
 import type {
   DriverAdapter,
   IterateTableOptions,
@@ -395,8 +402,33 @@ export const mysqlDriver: DriverAdapter = {
       options.schema,
       options.name,
       options.columns,
+      options.foreignKeys,
     );
     await this.runQuery(c, sqlText);
+    for (const idx of options.indexes ?? []) {
+      await this.createIndex(c, {
+        schema: options.schema,
+        table: options.name,
+        ...idx,
+      });
+    }
+  },
+
+  async createIndex(c, options) {
+    await this.runQuery(c, buildMysqlCreateIndexSql(options));
+  },
+
+  async dropIndex(c, options) {
+    // MySQL indexes are scoped to their table — need ALTER TABLE … DROP INDEX.
+    if (!options.table) {
+      throw new Error("MySQL: dropIndex requiere `table`");
+    }
+    await this.runQuery(
+      c,
+      `ALTER TABLE ${ident(options.schema)}.${ident(
+        options.table,
+      )} DROP INDEX ${ident(options.name)}`,
+    );
   },
 
   async dropTable(c, schema, name) {
@@ -444,6 +476,7 @@ function buildMysqlCreateTableFromDraft(
   schema: string,
   name: string,
   columns: CreateTableColumn[],
+  foreignKeys: CreateTableForeignKey[] | undefined,
 ): string {
   if (!schema.trim()) throw new Error("Database requerida");
   if (!name.trim()) throw new Error("Nombre de tabla requerido");
@@ -462,9 +495,29 @@ function buildMysqlCreateTableFromDraft(
   if (pk.length > 0) {
     colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
   }
+  for (const fk of foreignKeys ?? []) {
+    colLines.push("  " + renderForeignKeyClause("mysql", fk));
+  }
   return `CREATE TABLE ${qiCore("mysql", schema)}.${qiCore("mysql", name)} (\n${colLines.join(
     ",\n",
   )}\n);`;
+}
+
+function buildMysqlCreateIndexSql(options: CreateIndexOptions): string {
+  if (!options.table.trim()) throw new Error("table requerido");
+  if (options.columns.length === 0)
+    throw new Error("Agregá al menos una columna al índice");
+  const unique = options.unique ? "UNIQUE " : "";
+  const idxName = (options.name ?? autoIndexName(options.table, options.columns)).trim();
+  const fqTable = `${qiCore("mysql", options.schema)}.${qiCore(
+    "mysql",
+    options.table,
+  )}`;
+  const cols = options.columns.map((c) => qiCore("mysql", c)).join(", ");
+  return `CREATE ${unique}INDEX ${qiCore(
+    "mysql",
+    idxName,
+  )} ON ${fqTable} (${cols});`;
 }
 
 function quoteStringMysql(s: string): string {

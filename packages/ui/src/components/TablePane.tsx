@@ -1195,54 +1195,284 @@ export function TablePane({
       )}
 
       {tab === "indexes" && (
-        <IndexesTab details={details} loading={loading && !details} />
+        <IndexesTab
+          connectionId={connectionId}
+          driver={driver}
+          schema={schema}
+          name={name}
+          details={details}
+          loading={loading && !details}
+          onChanged={refreshDetails}
+        />
       )}
     </div>
   );
 }
 
-function IndexesTab({
-  details,
-  loading,
-}: {
+interface IndexesTabProps {
+  connectionId: string;
+  driver: DatabaseDriver | null;
+  schema: string;
+  name: string;
   details: TableDetails | null;
   loading: boolean;
-}) {
-  if (loading && !details) return <div className="dv-empty" style={{ marginTop: 20 }}>Cargando índices…</div>;
-  if (!details) return null;
-  if (details.indexes.length === 0) {
-    return <div className="dv-empty" style={{ marginTop: 20 }}>Sin índices.</div>;
+  onChanged: () => void;
+}
+
+function IndexesTab({
+  connectionId,
+  driver,
+  schema,
+  name,
+  details,
+  loading,
+  onChanged,
+}: IndexesTabProps) {
+  const transport = useTransport();
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState({
+    name: "",
+    columns: "",
+    unique: false,
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDrop, setConfirmDrop] = useState<string | null>(null);
+
+  async function submitCreate() {
+    setError(null);
+    const cols = draft.columns
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (cols.length === 0) {
+      setError("Agregá al menos una columna");
+      return;
+    }
+    setBusy(true);
+    try {
+      await transport.createIndex(connectionId, {
+        schema,
+        table: name,
+        name: draft.name.trim() || undefined,
+        columns: cols,
+        unique: draft.unique,
+      });
+      setDraft({ name: "", columns: "", unique: false });
+      setCreating(false);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
-  return (
-    <div className="dv-card" style={{ marginTop: 16, overflow: "hidden" }}>
-      <div className="dv-card-body is-tight">
-        <table className="dv-deflist">
-          <thead>
-            <tr>
-              <th>Nombre</th>
-              <th>Columnas</th>
-              <th>Tipo</th>
-            </tr>
-          </thead>
-          <tbody>
-            {details.indexes.map((idx) => (
-              <tr key={idx.name}>
-                <td style={{ fontWeight: 500 }}>{idx.name}</td>
-                <td className="is-mono is-dim">{idx.columns.join(", ")}</td>
-                <td>
-                  {idx.primary ? (
-                    <span className="dv-tag is-accent">PRIMARY</span>
-                  ) : idx.unique ? (
-                    <span className="dv-tag is-info">UNIQUE</span>
-                  ) : (
-                    <span className="dv-tag">INDEX</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+
+  async function doDrop(idxName: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await transport.dropIndex(connectionId, {
+        schema,
+        table: name,
+        name: idxName,
+      });
+      setConfirmDrop(null);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading && !details)
+    return (
+      <div className="dv-empty" style={{ marginTop: 20 }}>
+        Cargando índices…
       </div>
+    );
+  if (!details) return null;
+
+  const userIndexes = details.indexes.filter((i) => !i.primary);
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
+        <span style={{ fontSize: 12, color: "var(--dv-text-dim)" }}>
+          {details.indexes.length} índice
+          {details.indexes.length === 1 ? "" : "s"}
+        </span>
+        <button
+          type="button"
+          className="dv-button is-sm"
+          onClick={() => setCreating((c) => !c)}
+          disabled={busy}
+        >
+          {creating ? "Cancelar" : "+ Índice"}
+        </button>
+      </div>
+
+      {creating && (
+        <div
+          className="dv-card"
+          style={{
+            marginBottom: 12,
+            padding: 12,
+            display: "grid",
+            gap: 8,
+            gridTemplateColumns: "1fr 2fr 80px auto",
+            alignItems: "end",
+          }}
+        >
+          <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+            <span>Nombre (opcional)</span>
+            <input
+              type="text"
+              className="dv-input"
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              placeholder="(auto)"
+              disabled={busy}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+            <span>Columnas</span>
+            <input
+              type="text"
+              className="dv-input"
+              value={draft.columns}
+              onChange={(e) =>
+                setDraft({ ...draft, columns: e.target.value })
+              }
+              placeholder="col1, col2"
+              disabled={busy}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 11,
+              padding: "8px 0",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={draft.unique}
+              onChange={(e) =>
+                setDraft({ ...draft, unique: e.target.checked })
+              }
+              disabled={busy}
+            />
+            UNIQUE
+          </label>
+          <button
+            type="button"
+            className="dv-button is-primary is-sm"
+            onClick={submitCreate}
+            disabled={busy || !draft.columns.trim()}
+          >
+            {busy ? "Creando…" : "Crear"}
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="dv-error" style={{ marginBottom: 12 }}>
+          {error}
+        </div>
+      )}
+
+      {details.indexes.length === 0 ? (
+        <div className="dv-empty" style={{ marginTop: 8 }}>
+          Sin índices.
+        </div>
+      ) : (
+        <div className="dv-card" style={{ overflow: "hidden" }}>
+          <div className="dv-card-body is-tight">
+            <table className="dv-deflist">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Columnas</th>
+                  <th>Tipo</th>
+                  <th style={{ width: 60 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {details.indexes.map((idx) => {
+                  const isUser = !idx.primary;
+                  return (
+                    <tr key={idx.name}>
+                      <td style={{ fontWeight: 500 }}>{idx.name}</td>
+                      <td className="is-mono is-dim">
+                        {idx.columns.join(", ")}
+                      </td>
+                      <td>
+                        {idx.primary ? (
+                          <span className="dv-tag is-accent">PRIMARY</span>
+                        ) : idx.unique ? (
+                          <span className="dv-tag is-info">UNIQUE</span>
+                        ) : (
+                          <span className="dv-tag">INDEX</span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {isUser && (
+                          <button
+                            type="button"
+                            className="dv-button is-sm"
+                            onClick={() => setConfirmDrop(idx.name)}
+                            disabled={busy}
+                            title="DROP INDEX"
+                            style={{ padding: "2px 6px" }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {confirmDrop && (
+        <ConfirmDialog
+          title={`DROP INDEX ${confirmDrop}`}
+          message={
+            <>
+              Esto borra el índice <code>{confirmDrop}</code>. Las consultas que
+              dependían de él podrían volverse más lentas.
+            </>
+          }
+          confirmText={confirmDrop}
+          confirmLabel="DROP index"
+          destructive
+          onCancel={() => setConfirmDrop(null)}
+          onConfirm={() => doDrop(confirmDrop)}
+        />
+      )}
+
+      {/* Reference driver/name so the prop type narrows in the future when
+       * driver-specific UI lives here. */}
+      <span hidden>{driver}</span>
     </div>
   );
 }

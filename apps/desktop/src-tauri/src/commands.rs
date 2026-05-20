@@ -4,9 +4,9 @@ use crate::export::{
     self, ExportDatabaseOptions, ExportDatabaseResult, ExportTableOptions, ExportTableResult,
 };
 use crate::model::{
-    ConnectionConfig, ConnectionInput, ConnectionOverview, CreateSchemaOptions, CreateTableOptions,
-    DropOptions, Folder, FolderInput, PageOptions, QueryResult, RelationInfo, SchemaInfo,
-    TableDetails, Tag, TagInput, TestConnectionResult,
+    ConnectionConfig, ConnectionInput, ConnectionOverview, CreateIndexOptions, CreateSchemaOptions,
+    CreateTableOptions, DropIndexOptions, DropOptions, Folder, FolderInput, PageOptions,
+    QueryResult, RelationInfo, SchemaInfo, TableDetails, Tag, TagInput, TestConnectionResult,
 };
 use crate::state::AppState;
 use std::path::PathBuf;
@@ -221,6 +221,26 @@ pub async fn truncate_table(
 ) -> AppResult<()> {
     let conn = state.store().resolve(&connection_id)?;
     db::truncate_table(&conn, &schema, &name, &options.unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn create_index(
+    connection_id: String,
+    options: CreateIndexOptions,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::create_index(&conn, &options).await
+}
+
+#[tauri::command]
+pub async fn drop_index(
+    connection_id: String,
+    options: DropIndexOptions,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.store().resolve(&connection_id)?;
+    db::drop_index(&conn, &options).await
 }
 
 /// Read a UTF-8 text file from disk. Used by the desktop app to open .sql

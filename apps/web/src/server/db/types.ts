@@ -2,8 +2,10 @@ import type {
   ColumnInfo,
   ConnectionConfig,
   ConnectionOverview,
+  CreateIndexOptions,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropIndexOptions,
   DropOptions,
   PageOptions,
   QueryResult,
@@ -96,4 +98,6 @@ export interface DriverAdapter {
     name: string,
     options?: DropOptions,
   ): Promise<void>;
+  createIndex(conn: ResolvedConnection, options: CreateIndexOptions): Promise<void>;
+  dropIndex(conn: ResolvedConnection, options: DropIndexOptions): Promise<void>;
 }

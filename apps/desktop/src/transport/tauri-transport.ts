@@ -4,8 +4,10 @@ import type {
   ConnectionConfig,
   ConnectionInput,
   ConnectionOverview,
+  CreateIndexOptions,
   CreateSchemaOptions,
   CreateTableOptions,
+  DropIndexOptions,
   DropOptions,
   ExportDatabaseOptions,
   ExportDatabaseResult,
@@ -89,6 +91,10 @@ export const tauriTransport: Transport = {
     call<void>("drop_schema", { connectionId, name, options }),
   truncateTable: (connectionId, schema, name, options?: DropOptions) =>
     call<void>("truncate_table", { connectionId, schema, name, options }),
+  createIndex: (connectionId, options: CreateIndexOptions) =>
+    call<void>("create_index", { connectionId, options }),
+  dropIndex: (connectionId, options: DropIndexOptions) =>
+    call<void>("drop_index", { connectionId, options }),
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const targetPath = await pickSaveLocation("database", "sql");
     if (!targetPath) throw new ExportCancelled();
