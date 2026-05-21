@@ -164,6 +164,9 @@ export function AppShell({
     { schema: string; name: string } | null
   >(null);
   const [truncateCascade, setTruncateCascade] = useState(false);
+  const [deleteConnectionId, setDeleteConnectionId] = useState<string | null>(
+    null,
+  );
   /** Bumped whenever a schema/table is created so the Sidebar's effects
    * re-fetch schemas/relations without us having to plumb a callback through
    * its internals. The Sidebar keys its useEffect deps on `connectionId` and
@@ -1107,6 +1110,11 @@ export function AppShell({
                   void generateSqlFor(active.id, schemaName, name, kind)
               : undefined
           }
+          onEditConnection={(id) => {
+            setEditingConnectionId(id);
+            setShowForm(true);
+          }}
+          onDeleteConnection={(id) => setDeleteConnectionId(id)}
           refreshToken={sidebarRefreshToken}
         />
         <SidebarResizer
@@ -1326,6 +1334,48 @@ export function AppShell({
           }}
         />
       )}
+      {deleteConnectionId && (() => {
+        const target = connections.find((c) => c.id === deleteConnectionId);
+        if (!target) {
+          // La conexión ya no está (la borraron desde otro lado); cerramos.
+          return null;
+        }
+        return (
+          <ConfirmDialog
+            title={`Eliminar conexión ${target.name}`}
+            message={
+              <>
+                Esto borra la conexión <strong>{target.name}</strong> y sus
+                pestañas / archivos SQL guardados localmente. No toca la base
+                de datos remota.
+              </>
+            }
+            confirmText={target.name}
+            confirmLabel="Eliminar"
+            destructive
+            onCancel={() => setDeleteConnectionId(null)}
+            onConfirm={async () => {
+              await transport.deleteConnection(target.id);
+              // Limpiar storage local de esa conexión para no dejar basura.
+              if (typeof window !== "undefined") {
+                try {
+                  window.localStorage.removeItem(TABS_KEY(target.id));
+                  window.localStorage.removeItem(ACTIVE_KEY(target.id));
+                  window.localStorage.removeItem(FILES_KEY(target.id));
+                  window.localStorage.removeItem(GROUPS_KEY(target.id));
+                } catch {
+                  /* ignore */
+                }
+              }
+              if (activeId === target.id) {
+                setActiveId(null);
+              }
+              setDeleteConnectionId(null);
+              await refresh();
+            }}
+          />
+        );
+      })()}
       {showForm && (
         <ConnectionForm
           folders={folders}

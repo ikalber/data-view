@@ -80,6 +80,10 @@ interface Props {
     name: string,
     kind: "select" | "insert" | "update" | "delete" | "ddl",
   ) => void;
+  /** Abre el formulario de edición para la conexión indicada. */
+  onEditConnection?: (id: string) => void;
+  /** Pide confirmación y elimina la conexión indicada. */
+  onDeleteConnection?: (id: string) => void;
   /** Bumped by the parent after a create-schema/create-table action so the
    * sidebar refetches schemas and relations without losing local state. */
   refreshToken?: number;
@@ -133,6 +137,8 @@ export function Sidebar({
   onDropTable,
   onTruncateTable,
   onGenerateSql,
+  onEditConnection,
+  onDeleteConnection,
   refreshToken = 0,
 }: Props) {
   const transport = useTransport();
@@ -154,10 +160,25 @@ export function Sidebar({
   const pickerRef = useRef<HTMLDivElement>(null);
 
   // Right-click context menu state. `target` describes what was clicked so we
-  // can build the appropriate item list at render time.
+  // can build the appropriate item list at render time. `connectionId` se usa
+  // en el árbol global para que las acciones (DROP, TRUNCATE, generar SQL,
+  // crear tabla…) operen sobre la conexión correspondiente aunque no sea la
+  // activa: switcheamos primero a esa conexión y disparamos la acción.
   type ContextTarget =
-    | { kind: "table"; schema: string; name: string; isSystem?: boolean }
-    | { kind: "schema"; schema: string; isSystem: boolean };
+    | {
+        kind: "table";
+        schema: string;
+        name: string;
+        isSystem?: boolean;
+        connectionId?: string;
+      }
+    | {
+        kind: "schema";
+        schema: string;
+        isSystem: boolean;
+        connectionId?: string;
+      }
+    | { kind: "connection"; id: string; name: string };
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -168,13 +189,14 @@ export function Sidebar({
     e: React.MouseEvent,
     schema: string,
     name: string,
+    targetConnectionId?: string,
   ) {
     if (!onDropTable && !onTruncateTable && !onGenerateSql) return;
     e.preventDefault();
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      target: { kind: "table", schema, name },
+      target: { kind: "table", schema, name, connectionId: targetConnectionId },
     });
   }
 
@@ -182,6 +204,7 @@ export function Sidebar({
     e: React.MouseEvent,
     schemaName: string,
     isSystem: boolean,
+    targetConnectionId?: string,
   ) {
     if (isSystem && !onCreateTable) return;
     if (!onDropDatabase && !onCreateTable) return;
@@ -189,16 +212,76 @@ export function Sidebar({
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      target: { kind: "schema", schema: schemaName, isSystem },
+      target: {
+        kind: "schema",
+        schema: schemaName,
+        isSystem,
+        connectionId: targetConnectionId,
+      },
+    });
+  }
+
+  function openConnectionMenu(
+    e: React.MouseEvent,
+    id: string,
+    name: string,
+  ) {
+    if (!onEditConnection && !onDeleteConnection) return;
+    e.preventDefault();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { kind: "connection", id, name },
     });
   }
 
   function buildContextItems(target: ContextTarget): ContextMenuItem[] {
+    // En el árbol global el target puede vivir en otra conexión. Antes de
+    // disparar acciones que asumen la conexión activa (DROP/TRUNCATE/generar
+    // SQL/crear tabla), nos aseguramos de switchear a esa conexión.
+    const ensureActive =
+      target.kind !== "connection" &&
+      target.connectionId &&
+      target.connectionId !== connectionId
+        ? (cb: () => void) => {
+            onSelectConnection?.(target.connectionId!);
+            cb();
+          }
+        : (cb: () => void) => cb();
+
+    if (target.kind === "connection") {
+      const items: ContextMenuItem[] = [];
+      if (onEditConnection) {
+        items.push({
+          label: "Editar conexión…",
+          onClick: () => onEditConnection(target.id),
+        });
+      }
+      if (onDeleteConnection) {
+        if (items.length > 0) items.push({ separator: true });
+        items.push({
+          label: "Eliminar conexión…",
+          destructive: true,
+          onClick: () => onDeleteConnection(target.id),
+        });
+      }
+      return items;
+    }
     if (target.kind === "table") {
       const items: ContextMenuItem[] = [
         {
           label: "Abrir",
-          onClick: () => onOpenTable(target.schema, target.name),
+          onClick: () => {
+            if (target.connectionId && onOpenTableInConnection) {
+              onOpenTableInConnection(
+                target.connectionId,
+                target.schema,
+                target.name,
+              );
+            } else {
+              onOpenTable(target.schema, target.name);
+            }
+          },
         },
       ];
       if (onGenerateSql) {
@@ -206,27 +289,38 @@ export function Sidebar({
           { separator: true },
           {
             label: "Generar CREATE TABLE",
-            onClick: () => onGenerateSql(target.schema, target.name, "ddl"),
+            onClick: () =>
+              ensureActive(() =>
+                onGenerateSql(target.schema, target.name, "ddl"),
+              ),
           },
           {
             label: "Generar SELECT",
             onClick: () =>
-              onGenerateSql(target.schema, target.name, "select"),
+              ensureActive(() =>
+                onGenerateSql(target.schema, target.name, "select"),
+              ),
           },
           {
             label: "Generar INSERT",
             onClick: () =>
-              onGenerateSql(target.schema, target.name, "insert"),
+              ensureActive(() =>
+                onGenerateSql(target.schema, target.name, "insert"),
+              ),
           },
           {
             label: "Generar UPDATE",
             onClick: () =>
-              onGenerateSql(target.schema, target.name, "update"),
+              ensureActive(() =>
+                onGenerateSql(target.schema, target.name, "update"),
+              ),
           },
           {
             label: "Generar DELETE",
             onClick: () =>
-              onGenerateSql(target.schema, target.name, "delete"),
+              ensureActive(() =>
+                onGenerateSql(target.schema, target.name, "delete"),
+              ),
           },
         );
       }
@@ -236,14 +330,18 @@ export function Sidebar({
           items.push({
             label: "TRUNCATE table…",
             destructive: true,
-            onClick: () => onTruncateTable(target.schema, target.name),
+            onClick: () =>
+              ensureActive(() =>
+                onTruncateTable(target.schema, target.name),
+              ),
           });
         }
         if (onDropTable) {
           items.push({
             label: "DROP table…",
             destructive: true,
-            onClick: () => onDropTable(target.schema, target.name),
+            onClick: () =>
+              ensureActive(() => onDropTable(target.schema, target.name)),
           });
         }
       }
@@ -254,7 +352,7 @@ export function Sidebar({
     if (onCreateTable && !target.isSystem) {
       items.push({
         label: "Crear tabla acá…",
-        onClick: () => onCreateTable(target.schema),
+        onClick: () => ensureActive(() => onCreateTable(target.schema)),
       });
     }
     if (onDropDatabase && !target.isSystem) {
@@ -262,7 +360,7 @@ export function Sidebar({
       items.push({
         label: `DROP ${driver === "mysql" ? "database" : "schema"}…`,
         destructive: true,
-        onClick: () => onDropDatabase(target.schema),
+        onClick: () => ensureActive(() => onDropDatabase(target.schema)),
       });
     }
     return items;
@@ -842,6 +940,11 @@ export function Sidebar({
           onToggleConn: toggleGlobalConn,
           onSchemaClick: handleGlobalSchemaClick,
           onTableClick: handleGlobalTableClick,
+          onConnContextMenu: (e, id, name) => openConnectionMenu(e, id, name),
+          onSchemaContextMenu: (e, connId, schemaName, isSystem) =>
+            openSchemaMenu(e, schemaName, isSystem, connId),
+          onTableContextMenu: (e, connId, schemaName, name) =>
+            openTableMenu(e, schemaName, name, connId),
         })
       ) : mode === "select" ? (
         <div className="dv-tables-section">
@@ -1192,6 +1295,19 @@ interface GlobalTreeProps {
     name: string,
     opts?: OpenOpts,
   ) => void;
+  onConnContextMenu: (e: React.MouseEvent, connId: string, name: string) => void;
+  onSchemaContextMenu: (
+    e: React.MouseEvent,
+    connId: string,
+    schema: string,
+    isSystem: boolean,
+  ) => void;
+  onTableContextMenu: (
+    e: React.MouseEvent,
+    connId: string,
+    schema: string,
+    name: string,
+  ) => void;
 }
 
 function renderGlobalTree(p: GlobalTreeProps) {
@@ -1214,6 +1330,9 @@ function renderGlobalTree(p: GlobalTreeProps) {
     onToggleConn,
     onSchemaClick,
     onTableClick,
+    onConnContextMenu,
+    onSchemaContextMenu,
+    onTableContextMenu,
   } = p;
 
   if (connections.length === 0) {
@@ -1286,9 +1405,10 @@ function renderGlobalTree(p: GlobalTreeProps) {
             isActive && "is-active",
           )}
           onClick={() => onToggleConn(c.id)}
+          onContextMenu={(e) => onConnContextMenu(e, c.id, c.name)}
           role="button"
           tabIndex={0}
-          title={`${c.driver} · ${c.host}:${c.port}`}
+          title={`${c.driver} · ${c.host}:${c.port} — clic derecho para acciones`}
         >
           <span className="dv-schema-tree-caret">
             {isExpanded ? "▾" : "▸"}
@@ -1348,6 +1468,9 @@ function renderGlobalTree(p: GlobalTreeProps) {
           )}
           onClick={() => onSchemaClick(c.id, s.name, { preview: true })}
           onDoubleClick={() => onSchemaClick(c.id, s.name, { preview: false })}
+          onContextMenu={(e) =>
+            onSchemaContextMenu(e, c.id, s.name, s.isSystem)
+          }
         >
           <span className="dv-schema-tree-caret">
             {isExpanded ? "▾" : "▸"}
@@ -1389,7 +1512,10 @@ function renderGlobalTree(p: GlobalTreeProps) {
                   onDoubleClick={() =>
                     onTableClick(c.id, r.schema, r.name, { preview: false })
                   }
-                  title={`${c.name} · ${r.schema}.${r.name}`}
+                  onContextMenu={(e) =>
+                    onTableContextMenu(e, c.id, r.schema, r.name)
+                  }
+                  title={`${c.name} · ${r.schema}.${r.name} — clic derecho para acciones`}
                 >
                   <span className="dv-table-row-icon">
                     {r.kind === "view"
