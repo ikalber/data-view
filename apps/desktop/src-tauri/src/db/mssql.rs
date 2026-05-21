@@ -96,20 +96,29 @@ pub async fn list_relations(
     schema: Option<&str>,
 ) -> AppResult<Vec<RelationInfo>> {
     let mut client = connect(c).await?;
+    // Sizes from sys.dm_db_partition_stats (8 KB pages); only heap + clustered
+    // index (index_id IN (0,1)) so we get heap-equivalent "data" and reserved
+    // pages for "total". Views report NULL via OUTER APPLY.
+    let select = "SELECT s.name, o.name, o.type,
+                         ps.row_count, ps.total_pages, ps.used_pages
+                  FROM sys.objects o
+                  JOIN sys.schemas s ON s.schema_id = o.schema_id
+                  OUTER APPLY (
+                    SELECT SUM(p.rows) AS row_count,
+                           SUM(p.reserved_page_count) AS total_pages,
+                           SUM(p.used_page_count) AS used_pages
+                    FROM sys.dm_db_partition_stats p
+                    WHERE p.object_id = o.object_id AND p.index_id IN (0, 1)
+                  ) ps
+                  WHERE o.type IN ('U','V')";
     let sql = match schema {
-        Some(_) => "SELECT s.name, o.name, o.type
-                    FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
-                    WHERE o.type IN ('U','V') AND s.name = @P1
-                    ORDER BY s.name, o.name",
-        None => "SELECT s.name, o.name, o.type
-                 FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
-                 WHERE o.type IN ('U','V')
-                 ORDER BY s.name, o.name",
+        Some(_) => format!("{} AND s.name = @P1 ORDER BY s.name, o.name", select),
+        None => format!("{} ORDER BY s.name, o.name", select),
     };
     let stream = if let Some(s) = schema {
-        client.query(sql, &[&s]).await?
+        client.query(&sql, &[&s]).await?
     } else {
-        client.query(sql, &[]).await?
+        client.query(&sql, &[]).await?
     };
     let rows = stream.into_first_result().await?;
     Ok(rows
@@ -118,15 +127,26 @@ pub async fn list_relations(
             let s: &str = row.get(0).unwrap_or("");
             let n: &str = row.get(1).unwrap_or("");
             let t: &str = row.get(2).unwrap_or("U");
+            let approx_rows: Option<i64> = row.get(3);
+            let total_pages: Option<i64> = row.get(4);
+            let used_pages: Option<i64> = row.get(5);
             let kind = if t.trim() == "V" {
                 RelationKind::View
             } else {
                 RelationKind::Table
             };
+            let to_bytes = |pages: Option<i64>| {
+                pages.and_then(|p| if p >= 0 { Some((p as u64) * 8192) } else { None })
+            };
             RelationInfo {
                 schema: s.to_string(),
                 name: n.to_string(),
                 kind,
+                approx_row_count: approx_rows
+                    .and_then(|n| if n >= 0 { Some(n as u64) } else { None }),
+                total_bytes: to_bytes(total_pages),
+                data_bytes: to_bytes(used_pages),
+                index_bytes: None,
             }
         })
         .collect())

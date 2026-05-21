@@ -73,7 +73,18 @@ pub async fn list_relations(
     schema: Option<&str>,
 ) -> AppResult<Vec<RelationInfo>> {
     let client = connect(c).await?;
-    let sql = "SELECT n.nspname, c.relname, c.relkind::text
+    // pg_total_relation_size includes heap + indexes + toast; pg_relation_size
+    // is heap only; pg_indexes_size sums secondary indexes. Views/foreign
+    // tables get NULL — UI renders missing values as "—".
+    let sql = "SELECT n.nspname, c.relname, c.relkind::text,
+                      CASE WHEN c.relkind IN ('r','m','p') AND c.reltuples >= 0
+                           THEN c.reltuples::bigint END AS approx_rows,
+                      CASE WHEN c.relkind IN ('r','m','p')
+                           THEN pg_total_relation_size(c.oid) END AS total_bytes,
+                      CASE WHEN c.relkind IN ('r','m','p')
+                           THEN pg_relation_size(c.oid) END AS data_bytes,
+                      CASE WHEN c.relkind IN ('r','m','p')
+                           THEN pg_indexes_size(c.oid) END AS index_bytes
                FROM pg_class c
                JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE c.relkind IN ('r','v','m','p')
@@ -85,6 +96,10 @@ pub async fn list_relations(
         let s: String = row.get(0);
         let n: String = row.get(1);
         let kind: String = row.get(2);
+        let approx_rows: Option<i64> = row.try_get(3).ok();
+        let total_bytes: Option<i64> = row.try_get(4).ok();
+        let data_bytes: Option<i64> = row.try_get(5).ok();
+        let index_bytes: Option<i64> = row.try_get(6).ok();
         let kind = match kind.as_str() {
             "v" => RelationKind::View,
             "m" => RelationKind::MaterializedView,
@@ -94,9 +109,17 @@ pub async fn list_relations(
             schema: s,
             name: n,
             kind,
+            approx_row_count: non_negative(approx_rows),
+            total_bytes: non_negative(total_bytes),
+            data_bytes: non_negative(data_bytes),
+            index_bytes: non_negative(index_bytes),
         });
     }
     Ok(out)
+}
+
+fn non_negative(v: Option<i64>) -> Option<u64> {
+    v.and_then(|n| if n >= 0 { Some(n as u64) } else { None })
 }
 
 pub async fn get_connection_overview(c: &ResolvedConnection) -> AppResult<ConnectionOverview> {

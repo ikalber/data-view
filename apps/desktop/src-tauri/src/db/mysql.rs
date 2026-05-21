@@ -75,9 +75,13 @@ pub async fn list_relations(
 ) -> AppResult<Vec<RelationInfo>> {
     let mut conn = connect(c).await?;
     let target = schema.map(String::from).unwrap_or_else(|| c.database.clone());
-    let rows: Vec<(String, String, String)> = conn
+    // table_rows / data_length / index_length are InnoDB statistics cached
+    // until ANALYZE TABLE — close enough for an overview, NULL for views.
+    let rows: Vec<(String, String, String, Option<u64>, Option<u64>, Option<u64>)> = conn
         .exec(
-            "SELECT table_schema, table_name, table_type FROM information_schema.tables
+            "SELECT table_schema, table_name, table_type,
+                    table_rows, data_length, index_length
+             FROM information_schema.tables
              WHERE table_schema = ? ORDER BY table_name",
             (target,),
         )
@@ -85,16 +89,24 @@ pub async fn list_relations(
     let _ = conn.disconnect().await;
     Ok(rows
         .into_iter()
-        .map(|(s, n, t)| {
+        .map(|(s, n, t, approx_rows, data_len, idx_len)| {
             let kind = if t == "VIEW" {
                 RelationKind::View
             } else {
                 RelationKind::Table
             };
+            let total = match (data_len, idx_len) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            };
             RelationInfo {
                 schema: s,
                 name: n,
                 kind,
+                approx_row_count: approx_rows,
+                total_bytes: total,
+                data_bytes: data_len,
+                index_bytes: idx_len,
             }
         })
         .collect())

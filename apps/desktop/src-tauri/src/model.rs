@@ -174,6 +174,14 @@ pub struct RelationInfo {
     pub schema: String,
     pub name: String,
     pub kind: RelationKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approx_row_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
