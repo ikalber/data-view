@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   defaultPort,
@@ -27,6 +27,29 @@ interface Props {
 
 const DRIVERS: DatabaseDriver[] = ["postgres", "mysql", "mssql"];
 
+/** Port to show after switching driver: follow the new driver's default
+ * unless the user had typed a custom port (e.g. a Docker-mapped 15432). */
+export function portAfterDriverChange(
+  prevDriver: DatabaseDriver,
+  nextDriver: DatabaseDriver,
+  port: number,
+): number {
+  if (!Number.isInteger(port) || port <= 0 || port === defaultPort(prevDriver)) {
+    return defaultPort(nextDriver);
+  }
+  return port;
+}
+
+/** Spanish error for the fields we can check client-side, or null. */
+export function validateConnectionInput(form: ConnectionInput): string | null {
+  if (!form.name.trim()) return "El nombre es obligatorio.";
+  if (!form.host.trim()) return "El host es obligatorio.";
+  if (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535) {
+    return "El puerto tiene que ser un número entre 1 y 65535.";
+  }
+  return null;
+}
+
 export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Props) {
   const transport = useTransport();
   const [form, setForm] = useState<ConnectionInput>({
@@ -46,9 +69,13 @@ export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Pr
   const [test, setTest] = useState<TestConnectionResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped on every edit so a "Probar" still in flight doesn't report its
+  // result for a config the user has since changed.
+  const testSeqRef = useRef(0);
 
   function update<K extends keyof ConnectionInput>(key: K, value: ConnectionInput[K]) {
     setForm((f) => ({ ...f, [key]: value }));
+    testSeqRef.current += 1;
     setTest(null);
   }
 
@@ -71,19 +98,32 @@ export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Pr
   }
 
   async function handleTest() {
+    const invalid = validateConnectionInput(form);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     setBusy(true);
     setError(null);
+    const seq = ++testSeqRef.current;
     try {
       const res = await transport.testConnection(form);
-      setTest(res);
+      if (seq === testSeqRef.current) setTest(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (seq === testSeqRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setBusy(false);
     }
   }
 
   async function handleSave() {
+    const invalid = validateConnectionInput(form);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -118,7 +158,12 @@ export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Pr
             value={form.driver}
             onChange={(e) => {
               const driver = e.target.value as DatabaseDriver;
-              setForm((f) => ({ ...f, driver, port: defaultPort(driver) }));
+              setForm((f) => ({
+                ...f,
+                driver,
+                port: portAfterDriverChange(f.driver, driver, f.port),
+              }));
+              testSeqRef.current += 1;
               setTest(null);
             }}
           >
@@ -169,6 +214,10 @@ export function ConnectionForm({ folders, tags, initial, onCancel, onSaved }: Pr
             type="password"
             value={form.password ?? ""}
             onChange={(e) => update("password", e.target.value)}
+            // The saved password never reaches the UI; leaving this blank
+            // keeps it.
+            placeholder={initial?.id ? "Sin cambios" : undefined}
+            autoComplete="new-password"
           />
         </div>
         <div className="dv-form-row">

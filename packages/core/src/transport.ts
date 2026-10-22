@@ -132,6 +132,18 @@ export interface Transport {
     connectionId: string,
     options: DropIndexOptions,
   ): Promise<void>;
+
+  /**
+   * Optional: save text the UI already has in memory (e.g. "export visible
+   * rows") through a native "save as" dialog. Resolves to the saved path, or
+   * null if the user cancelled. Hosts without it (the web) fall back to a
+   * browser download; desktop webviews don't reliably handle those.
+   */
+  saveTextFile?(
+    suggestedName: string,
+    contents: string,
+    mime: string,
+  ): Promise<string | null>;
 }
 
 export interface DropOptions {
@@ -213,8 +225,10 @@ export interface DropIndexOptions {
 }
 
 export interface RunQueryOptions {
-  /** Override the active database/schema for this query. The adapter handles
-   * it driver-specifically (USE in MySQL/MSSQL, search_path in Postgres). */
+  /** Run the query against this schema. The adapter handles it
+   * driver-specifically: `USE` in MySQL (schema = database), `search_path` in
+   * Postgres. Ignored on SQL Server, where the app's "schema" lives inside the
+   * connection's database and there's no per-session default schema. */
   schema?: string;
   params?: unknown[];
 }

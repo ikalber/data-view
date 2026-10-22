@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Data View</title>
     <script>
-      // Apply persisted theme before React mounts to avoid a flash. Mirrors
-      // readInitialTheme() / themeInitScript in @data-view/ui.
+      // Apply persisted theme + variant before React mounts to avoid a flash.
+      // Mirrors themeInitScript in @data-view/ui (theme-context.tsx).
       (function () {
         try {
           var k = "dbview.theme";
@@ -19,8 +19,17 @@
               ? "hacker"
               : "minimal";
           document.documentElement.dataset.theme = t;
+          var vs = {
+            minimal: ["light", "dark", "sepia"],
+            hacker: ["magenta", "matrix", "cyan", "amber"],
+          };
+          var dv = { minimal: "light", hacker: "magenta" };
+          var v = localStorage.getItem("dbview.themeVariant." + t);
+          if (!v || vs[t].indexOf(v) === -1) v = dv[t];
+          document.documentElement.dataset.themeVariant = v;
         } catch (_) {
           document.documentElement.dataset.theme = "minimal";
+          document.documentElement.dataset.themeVariant = "light";
         }
       })();
     </script>

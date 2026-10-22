@@ -13,13 +13,16 @@
     "build:packages": "pnpm --filter \"./packages/*\" build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
-    "clean": "pnpm -r exec rm -rf node_modules dist .next .turbo"
+    "clean": "pnpm -r exec rm -rf node_modules dist .next .turbo",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=22.13"
   },
   "devDependencies": {
+    "@types/node": "^22.9.0",
     "typescript": "^5.6.3",
-    "@types/node": "^22.9.0"
+    "vitest": "^2.1.9"
   }
 }

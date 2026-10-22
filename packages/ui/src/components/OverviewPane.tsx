@@ -35,6 +35,9 @@ export function OverviewPane({
       return;
     }
     let cancel = false;
+    // Drop the previous schema's rows so they can't be clicked (opening a
+    // table in the wrong schema) while the new list loads.
+    setRelations([]);
     setLoading(true);
     setError(null);
     transport
@@ -147,12 +150,18 @@ export function OverviewPane({
             />
             <Stat
               label="Filas (aprox.)"
-              value={loading ? "—" : totalRows ? totalRows.toLocaleString() : "—"}
+              value={
+                loading || withRowCount.length === 0
+                  ? "—"
+                  : totalRows.toLocaleString()
+              }
               sub={withRowCount.length ? `${withRowCount.length} con stats` : "sin datos"}
             />
             <Stat
               label="Tamaño total"
-              value={loading ? "—" : formatBytes(totalSize || undefined)}
+              value={
+                loading || withSize.length === 0 ? "—" : formatBytes(totalSize)
+              }
               sub={
                 totalIndexes > 0
                   ? `índices ${formatBytes(totalIndexes)}`

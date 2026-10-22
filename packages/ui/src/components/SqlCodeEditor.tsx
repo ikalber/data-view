@@ -2,6 +2,7 @@
 
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -19,6 +20,7 @@ import {
   sql as sqlLang,
   type SQLDialect,
 } from "@codemirror/lang-sql";
+import { Prec } from "@codemirror/state";
 import { keymap } from "@codemirror/view";
 import { EditorView } from "@codemirror/view";
 import { useTheme } from "../theme-context";
@@ -68,6 +70,25 @@ const DARK_VARIANTS = new Set([
   "amber",
 ]);
 
+/** Hoisted so the prop is referentially stable: @uiw/react-codemirror
+ * reconfigures the whole editor whenever `basicSetup` changes identity. */
+const BASIC_SETUP = {
+  lineNumbers: true,
+  foldGutter: true,
+  highlightActiveLine: true,
+  highlightActiveLineGutter: true,
+  autocompletion: true,
+  bracketMatching: true,
+  closeBrackets: true,
+  history: true,
+  drawSelection: true,
+  dropCursor: true,
+  indentOnInput: true,
+  highlightSpecialChars: true,
+  highlightSelectionMatches: true,
+  searchKeymap: true,
+};
+
 /** Imperative handle exposed to parents (QueryEditor) so they can read the
  * current text selection — used to implement "Run selection". */
 export interface SqlEditorHandle {
@@ -91,6 +112,17 @@ export const SqlCodeEditor = forwardRef<SqlEditorHandle, Props>(function SqlCode
   const transport = useTransport();
   const isDark = DARK_VARIANTS.has(variant);
   const cmRef = useRef<ReactCodeMirrorRef>(null);
+
+  // Parents pass fresh closures on every render. Route them through refs so
+  // the extensions (incl. the schema completion built from every table name)
+  // and the editor config aren't rebuilt on each keystroke.
+  const onChangeRef = useRef(onChange);
+  const onSubmitRef = useRef(onSubmit);
+  const onSaveRef = useRef(onSave);
+  onChangeRef.current = onChange;
+  onSubmitRef.current = onSubmit;
+  onSaveRef.current = onSave;
+  const handleChange = useCallback((v: string) => onChangeRef.current(v), []);
 
   // CodeMirror is a client-only library: it injects its own DOM tree on mount
   // which Next.js's SSR can't reproduce, causing a hydration mismatch. Render
@@ -150,25 +182,30 @@ export const SqlCodeEditor = forwardRef<SqlEditorHandle, Props>(function SqlCode
         upperCaseKeywords: false,
       }),
       EditorView.lineWrapping,
-      keymap.of([
+      // Highest precedence: basicSetup's default keymap also binds Mod-Enter
+      // (insertBlankLine) and, being registered first, would win — so
+      // Ctrl/Cmd+Enter inserted a blank line instead of running the query.
+      Prec.highest(
+        keymap.of([
         {
           key: "Mod-Enter",
           run: () => {
-            onSubmit();
+            onSubmitRef.current();
             return true;
           },
         },
         {
           key: "Mod-s",
           run: () => {
-            onSave();
+            onSaveRef.current();
             return true;
           },
           preventDefault: true,
         },
-      ]),
+        ]),
+      ),
     ],
-    [driver, schemaMap, database, onSubmit, onSave],
+    [driver, schemaMap, database],
   );
 
   // Focus once the editor is ready when `autoFocus` flips on. CodeMirror
@@ -207,27 +244,12 @@ export const SqlCodeEditor = forwardRef<SqlEditorHandle, Props>(function SqlCode
       <CodeMirror
         ref={cmRef}
         value={value}
-        onChange={onChange}
+        onChange={handleChange}
         extensions={extensions}
         theme={isDark ? "dark" : "light"}
         height="100%"
         placeholder="-- Escribí tu SQL acá. Ctrl+Enter para ejecutar, Ctrl+S para guardar."
-        basicSetup={{
-          lineNumbers: true,
-          foldGutter: true,
-          highlightActiveLine: true,
-          highlightActiveLineGutter: true,
-          autocompletion: true,
-          bracketMatching: true,
-          closeBrackets: true,
-          history: true,
-          drawSelection: true,
-          dropCursor: true,
-          indentOnInput: true,
-          highlightSpecialChars: true,
-          highlightSelectionMatches: true,
-          searchKeymap: true,
-        }}
+        basicSetup={BASIC_SETUP}
       />
     </div>
   );

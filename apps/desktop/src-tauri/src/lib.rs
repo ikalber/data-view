@@ -1,11 +1,13 @@
 mod commands;
 mod crypto;
+mod db;
 mod error;
 mod export;
+#[cfg(test)]
+mod it_tests;
 mod model;
 mod state;
 mod storage;
-mod db;
 
 use state::AppState;
 
@@ -42,6 +44,7 @@ pub fn run() {
             commands::create_index,
             commands::drop_index,
             commands::read_text_file,
+            commands::write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running data-view");

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { signOut } from "next-auth/react";
 import { AppShell, ThemeProvider, TransportProvider } from "@data-view/ui";
 import { webTransport } from "@/transport/web-transport";
 
@@ -8,7 +9,10 @@ export function AppShellClient({ email }: { email: string }) {
   return (
     <ThemeProvider>
       <TransportProvider transport={webTransport}>
-        <AppShell userArea={<UserArea email={email} />} />
+        <AppShell
+          userArea={<UserArea email={email} />}
+          appVersion={process.env.NEXT_PUBLIC_APP_VERSION}
+        />
       </TransportProvider>
     </ThemeProvider>
   );
@@ -44,7 +48,11 @@ function UserArea({ email }: { email: string }) {
           }}
           onConfirm={() => {
             setSigningOut(true);
-            window.location.href = "/api/auth/signout";
+            // Direct sign-out: navigating to /api/auth/signout would show
+            // Auth.js' own (English) confirmation page on top of ours.
+            signOut({ redirectTo: "/login" }).catch(() => {
+              setSigningOut(false);
+            });
           }}
         />
       )}

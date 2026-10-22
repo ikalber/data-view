@@ -23,7 +23,9 @@ export interface ExportTableOptions {
 }
 
 export interface ExportTableResult {
-  rowCount: number;
+  /** Rows written. Undefined when the host can't know it (the web streams
+   * the file straight to the browser). */
+  rowCount?: number;
   bytes: number;
   durationMs: number;
   format: ExportFormat;
@@ -49,8 +51,9 @@ export interface ExportDatabaseOptions {
 export interface ExportDatabaseResult {
   bytes: number;
   durationMs: number;
-  tableCount: number;
-  rowCount: number;
+  /** Undefined when unknown (web streams the dump to the browser). */
+  tableCount?: number;
+  rowCount?: number;
   filePath?: string;
   fileName?: string;
 }

@@ -14,6 +14,7 @@ import {
   exportMimeType,
   formatExport,
 } from "../export-format";
+import { useTransport } from "../transport-context";
 
 interface Props {
   /** Source for in-memory export. May be null while loading. */
@@ -49,7 +50,9 @@ export function ExportMenu({
   className,
   disabled,
 }: Props) {
+  const transport = useTransport();
   const [open, setOpen] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -81,8 +84,17 @@ export function ExportMenu({
       includeHeader: true,
     });
     const filename = defaultExportFileName(baseName, format, driver ?? undefined);
-    downloadString(filename, exportMimeType(format), text);
+    const mime = exportMimeType(format);
     setOpen(false);
+    setSaveError(null);
+    if (transport.saveTextFile) {
+      // Desktop: native "save as" dialog (cancel resolves to null).
+      transport.saveTextFile(filename, text, mime).catch((e) => {
+        setSaveError(e instanceof Error ? e.message : String(e));
+      });
+    } else {
+      downloadString(filename, mime, text);
+    }
   }
 
   function doExportFull(format: ExportFormat) {
@@ -104,6 +116,18 @@ export function ExportMenu({
           ▾
         </span>
       </button>
+
+      {saveError && !open && (
+        <div
+          className="dv-error"
+          role="alert"
+          style={{ position: "absolute", right: 0, top: "100%", marginTop: 4, zIndex: 20, whiteSpace: "nowrap" }}
+          onClick={() => setSaveError(null)}
+          title="Cerrar"
+        >
+          No se pudo guardar el archivo: {saveError}
+        </div>
+      )}
 
       {open && (
         <div className="dv-export-menu" role="menu">

@@ -1,4 +1,4 @@
-import { Client, type ClientConfig } from "pg";
+import { Client, types as pgTypes, type ClientConfig, type CustomTypesConfig } from "pg";
 import type {
   ColumnInfo,
   CreateIndexOptions,
@@ -9,6 +9,7 @@ import type {
   DropIndexOptions,
   QueryResult,
   QueryResultColumn,
+  TableDetails,
 } from "@data-view/core";
 import {
   autoIndexName,
@@ -24,6 +25,34 @@ import type {
 
 const QUERY_LIMIT = 5000;
 
+// Date/time types are kept as the server's text. pg's default parsers turn
+// `date` / `timestamp` (no tz) into JS Dates in the *Node process* timezone,
+// which shifted values (e.g. DATE '2024-01-15' → "2024-01-15T03:00:00Z" on a
+// UTC-3 host) and dropped microseconds; intervals came back as objects.
+const RAW_TEXT_OIDS = new Set([
+  1082, // date
+  1083, // time
+  1114, // timestamp
+  1184, // timestamptz
+  1186, // interval
+  1266, // timetz
+]);
+const RAW_TEXT_ARRAY_OIDS = new Set([1182, 1183, 1115, 1185, 1187, 1270]);
+const TEXT_ARRAY_OID = 1009;
+
+// pg-types' TypeId enum doesn't list every OID; plain numbers work at runtime.
+const defaultTypeParser = pgTypes.getTypeParser as (oid: number, format?: "text" | "binary") => unknown;
+
+const pgTypeOverrides: CustomTypesConfig = {
+  getTypeParser: ((oid: number, format?: "text" | "binary") => {
+    if (format !== "binary") {
+      if (RAW_TEXT_OIDS.has(oid)) return (v: string) => v;
+      if (RAW_TEXT_ARRAY_OIDS.has(oid)) return defaultTypeParser(TEXT_ARRAY_OID, "text");
+    }
+    return defaultTypeParser(oid, format);
+  }) as CustomTypesConfig["getTypeParser"],
+};
+
 function clientConfig(c: ResolvedConnection): ClientConfig {
   return {
     host: c.host,
@@ -34,7 +63,28 @@ function clientConfig(c: ResolvedConnection): ClientConfig {
     ssl: c.ssl ? { rejectUnauthorized: false } : undefined,
     statement_timeout: 60_000,
     application_name: "data-view",
+    types: pgTypeOverrides,
   };
+}
+
+/** Append the DETAIL / HINT / LINE info pg attaches to errors — the bare
+ * message ("duplicate key value violates unique constraint …") loses which
+ * key collided or where a syntax error is. Mutates and returns the error so
+ * `code` & co. survive. */
+function enrichPgError(e: unknown, sqlText?: string): unknown {
+  if (!(e instanceof Error)) return e;
+  const pe = e as Error & { detail?: string; hint?: string; position?: string };
+  const extra: string[] = [];
+  if (pe.detail) extra.push(`DETAIL: ${pe.detail}`);
+  if (pe.hint) extra.push(`HINT: ${pe.hint}`);
+  const pos = pe.position ? Number(pe.position) : NaN;
+  if (sqlText && Number.isFinite(pos) && pos > 0 && sqlText.includes("\n")) {
+    const before = sqlText.slice(0, pos - 1);
+    const line = before.split("\n").length;
+    extra.push(`LINE ${line}: ${sqlText.split("\n")[line - 1]?.trim() ?? ""}`);
+  }
+  if (extra.length > 0) pe.message = `${pe.message}\n${extra.join("\n")}`;
+  return pe;
 }
 
 async function withClient<T>(c: ResolvedConnection, fn: (client: Client) => Promise<T>): Promise<T> {
@@ -47,20 +97,45 @@ async function withClient<T>(c: ResolvedConnection, fn: (client: Client) => Prom
   }
 }
 
-function shapeResult(res: import("pg").QueryArrayResult, durationMs: number): QueryResult {
-  const columns: QueryResultColumn[] = (res.fields ?? []).map((f) => ({
+type PgArrayResult = import("pg").QueryArrayResult;
+
+const DML_COMMANDS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE", "COPY"]);
+
+function shapeResult(
+  raw: PgArrayResult | PgArrayResult[],
+  durationMs: number,
+  maxRows = QUERY_LIMIT,
+): QueryResult {
+  // A multi-statement script (simple protocol) yields one result per
+  // statement. Show the last row-returning one, like most SQL clients, and
+  // add up the rows touched by the DML statements.
+  const all = Array.isArray(raw) ? raw : [raw];
+  const withRows = all.filter((r) => (r.fields ?? []).length > 0);
+  const res = withRows[withRows.length - 1] ?? all[all.length - 1];
+  const columns: QueryResultColumn[] = (res?.fields ?? []).map((f) => ({
     name: f.name,
     dataType: pgOidToName(f.dataTypeID),
   }));
-  const rows = (res.rows as unknown[][]).map((row) =>
+  const allRows = (res?.rows ?? []) as unknown[][];
+  const truncated = allRows.length > maxRows;
+  const rows = (truncated ? allRows.slice(0, maxRows) : allRows).map((row) =>
     row.map((cell) => normalizeCell(cell)),
   );
-  const truncated = rows.length === QUERY_LIMIT;
+  // pg's rowCount is also the row count of a SELECT; only DML counts as
+  // "affected", and only when the shown result isn't a row set.
+  let affectedRows: number | null = null;
+  if (columns.length === 0) {
+    for (const r of all) {
+      if (DML_COMMANDS.has(r.command) && typeof r.rowCount === "number") {
+        affectedRows = (affectedRows ?? 0) + r.rowCount;
+      }
+    }
+  }
   return {
     columns,
     rows: rows as QueryResult["rows"],
     rowCount: rows.length,
-    affectedRows: typeof res.rowCount === "number" ? res.rowCount : null,
+    affectedRows,
     durationMs,
     truncated,
   };
@@ -77,20 +152,34 @@ function normalizeCell(v: unknown) {
 // Minimal OID -> name map; pg returns numeric OIDs and we render the friendly name.
 const PG_OID_NAMES: Record<number, string> = {
   16: "bool",
+  17: "bytea",
+  18: "char",
+  19: "name",
   20: "int8",
   21: "int2",
   23: "int4",
   25: "text",
+  26: "oid",
+  114: "json",
   700: "float4",
   701: "float8",
+  790: "money",
+  1000: "_bool",
+  1005: "_int2",
+  1007: "_int4",
+  1009: "_text",
+  1016: "_int8",
+  1042: "bpchar",
   1043: "varchar",
   1082: "date",
+  1083: "time",
   1114: "timestamp",
   1184: "timestamptz",
+  1186: "interval",
+  1266: "timetz",
   1700: "numeric",
   2950: "uuid",
   3802: "jsonb",
-  114: "json",
 };
 function pgOidToName(oid: number) {
   return PG_OID_NAMES[oid] ?? `oid:${oid}`;
@@ -187,7 +276,9 @@ export const postgresDriver: DriverAdapter = {
           `SELECT version() AS version,
                   current_database() AS current_database,
                   current_user AS current_user,
-                  now()::text AS server_time,
+                  -- ISO-8601 UTC: now()::text ("… 03:11:43.12+00") is
+                  -- "Invalid Date" for Safari's Date parser.
+                  to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS server_time,
                   EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint AS uptime_seconds`,
         ),
         client.query<{
@@ -238,18 +329,38 @@ export const postgresDriver: DriverAdapter = {
 
   async describeTable(c, schema, name) {
     return withClient(c, async (client) => {
+      const rel = await client.query<{ relkind: string }>(
+        `SELECT c.relkind FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = $2`,
+        [schema, name],
+      );
+      const relkind = rel.rows[0]?.relkind;
+      const kind: TableDetails["kind"] =
+        relkind === "v" ? "view" : relkind === "m" ? "materialized_view" : "table";
+      // is_unique: the column alone is covered by a full (non-partial),
+      // non-primary unique index — same meaning as MySQL's `UNI` key.
       const cols = await client.query<{
         name: string;
         data_type: string;
         is_nullable: string;
         column_default: string | null;
         is_pk: boolean;
+        is_unique: boolean;
+        comment: string | null;
       }>(
         `SELECT a.attname AS name,
                 pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                 CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
                 pg_get_expr(d.adbin, d.adrelid) AS column_default,
-                COALESCE(p.is_pk, false) AS is_pk
+                COALESCE(p.is_pk, false) AS is_pk,
+                EXISTS (
+                  SELECT 1 FROM pg_index ui
+                  WHERE ui.indrelid = a.attrelid AND ui.indisunique
+                    AND NOT ui.indisprimary AND ui.indnatts = 1
+                    AND ui.indkey[0] = a.attnum AND ui.indpred IS NULL
+                ) AS is_unique,
+                col_description(a.attrelid, a.attnum) AS comment
          FROM pg_attribute a
          JOIN pg_class c ON c.oid = a.attrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -275,8 +386,14 @@ export const postgresDriver: DriverAdapter = {
         `SELECT ic.relname AS name,
                 i.indisunique AS is_unique,
                 i.indisprimary AS is_primary,
+                -- Plain columns by attname (pg_get_indexdef would return them
+                -- SQL-quoted, e.g. "select"); expressions via pg_get_indexdef.
                 ARRAY(
-                  SELECT pg_get_indexdef(i.indexrelid, k + 1, true)
+                  SELECT CASE WHEN i.indkey[k] = 0
+                              THEN pg_get_indexdef(i.indexrelid, k + 1, true)
+                              ELSE (SELECT ka.attname::text FROM pg_attribute ka
+                                    WHERE ka.attrelid = i.indrelid AND ka.attnum = i.indkey[k])
+                         END
                   FROM generate_subscripts(i.indkey, 1) AS k
                   ORDER BY k
                 ) AS columns
@@ -302,7 +419,7 @@ export const postgresDriver: DriverAdapter = {
         `SELECT
            c.conname AS name,
            ARRAY(
-             SELECT a.attname
+             SELECT a.attname::text
              FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
              ORDER BY k.ord
@@ -310,7 +427,7 @@ export const postgresDriver: DriverAdapter = {
            n2.nspname AS ref_schema,
            c2.relname AS ref_table,
            ARRAY(
-             SELECT a.attname
+             SELECT a.attname::text
              FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
              JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum
              ORDER BY k.ord
@@ -335,14 +452,15 @@ export const postgresDriver: DriverAdapter = {
       return {
         schema,
         name,
-        kind: "table",
+        kind,
         columns: cols.rows.map((row) => ({
           name: row.name,
           dataType: row.data_type,
           nullable: row.is_nullable === "YES",
           isPrimaryKey: row.is_pk,
-          isUnique: false,
+          isUnique: row.is_unique,
           default: row.column_default,
+          comment: row.comment,
         })),
         indexes: idx.rows.map((row) => ({
           name: row.name,
@@ -364,32 +482,21 @@ export const postgresDriver: DriverAdapter = {
   },
 
   async runQuery(c, sql, options) {
-    return withClient(c, async (client) => {
-      if (options?.schema) {
-        // search_path is per-session — safe to set on this short-lived client.
-        await client.query(`SET search_path TO ${ident(options.schema)}, public`);
-      }
-      const start = Date.now();
-      const r = await client.query({
-        text: sql,
-        values: options?.params,
-        rowMode: "array",
-      });
-      return shapeResult(r, Date.now() - start);
-    });
+    return runPg(c, sql, options?.schema, options?.params, QUERY_LIMIT);
   },
 
   async fetchTableData(c, schema, name, options) {
-    const limit = Math.min(options?.limit ?? 100, QUERY_LIMIT);
-    const offset = options?.offset ?? 0;
+    const limit = Math.max(0, Math.min(options?.limit ?? 100, QUERY_LIMIT));
+    const offset = Math.max(0, options?.offset ?? 0);
     const orderBy = options?.orderBy?.length
       ? `ORDER BY ${options.orderBy
-          .map((o) => `${ident(o.column)} ${o.direction.toUpperCase()}`)
+          .map((o) => `${ident(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`)
           .join(", ")}`
       : "";
     const where = options?.where?.trim() ? `WHERE ${options.where.trim()}` : "";
+    // Ask for one extra row so `truncated` can tell whether more rows exist.
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT $1 OFFSET $2`;
-    return this.runQuery(c, sql, { params: [limit, offset] });
+    return runPg(c, sql, undefined, [limit + 1, offset], limit);
   },
 
   async *iterateTable(c, opts) {
@@ -408,6 +515,7 @@ export const postgresDriver: DriverAdapter = {
           opts.schema,
         )}.${ident(opts.name)} ${where}`,
       );
+      let first = true;
       while (true) {
         const r = await client.query({
           text: `FETCH FORWARD ${batchSize} FROM ${ident(cursorName)}`,
@@ -420,7 +528,10 @@ export const postgresDriver: DriverAdapter = {
         const rows = (r.rows as unknown[][]).map((row) =>
           row.map((cell) => normalizeCell(cell)),
         );
-        if (rows.length === 0) break;
+        // An empty table still yields one (empty) batch so exporters get the
+        // column list for headers.
+        if (rows.length === 0 && !first) break;
+        first = false;
         yield { columns, rows } as TableBatch;
         if (rows.length < batchSize) break;
       }
@@ -428,7 +539,7 @@ export const postgresDriver: DriverAdapter = {
       await client.query("COMMIT");
     } catch (e) {
       await client.query("ROLLBACK").catch(() => undefined);
-      throw e;
+      throw enrichPgError(e);
     } finally {
       await client.end().catch(() => undefined);
     }
@@ -447,20 +558,33 @@ export const postgresDriver: DriverAdapter = {
   },
 
   async createTable(c, options) {
-    const sqlText = buildPostgresCreateTableFromDraft(
-      options.schema,
-      options.name,
-      options.columns,
-      options.foreignKeys,
-    );
-    await this.runQuery(c, sqlText);
-    for (const idx of options.indexes ?? []) {
-      await this.createIndex(c, {
-        schema: options.schema,
-        table: options.name,
-        ...idx,
-      });
-    }
+    const statements = [
+      buildPostgresCreateTableFromDraft(
+        options.schema,
+        options.name,
+        options.columns,
+        options.foreignKeys,
+      ),
+      ...(options.indexes ?? []).map((idx) =>
+        buildPostgresCreateIndexSql({ schema: options.schema, table: options.name, ...idx }),
+      ),
+    ];
+    // DDL is transactional in Postgres: run table + indexes atomically so a
+    // bad index doesn't leave a half-created table behind.
+    await withClient(c, async (client) => {
+      await client.query("BEGIN");
+      try {
+        for (const s of statements) {
+          await client.query(s).catch((e) => {
+            throw enrichPgError(e, s);
+          });
+        }
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw e;
+      }
+    });
   },
 
   async createIndex(c, options) {
@@ -497,15 +621,53 @@ export const postgresDriver: DriverAdapter = {
   },
 };
 
+async function runPg(
+  c: ResolvedConnection,
+  sql: string,
+  schema: string | undefined,
+  params: unknown[] | undefined,
+  maxRows: number,
+): Promise<QueryResult> {
+  return withClient(c, async (client) => {
+    if (schema) {
+      // search_path is per-session — safe to set on this short-lived client.
+      await client.query(`SET search_path TO ${ident(schema)}, public`);
+    }
+    const start = Date.now();
+    let r: PgArrayResult | PgArrayResult[];
+    try {
+      r = await client.query({ text: sql, values: params, rowMode: "array" });
+    } catch (e) {
+      throw enrichPgError(e, sql);
+    }
+    return shapeResult(r, Date.now() - start, maxRows);
+  });
+}
+
+// Integer columns fed by a sequence (`nextval('…'::regclass)`) are emitted as
+// serial types: the referenced sequence is owned by the source table, so it
+// doesn't exist in a fresh database nor after `DROP TABLE` (export with
+// "DROP IF EXISTS"), which made the generated DDL fail.
+const SERIAL_FOR_TYPE: Record<string, string> = {
+  smallint: "smallserial",
+  integer: "serial",
+  bigint: "bigserial",
+};
+const NEXTVAL_DEFAULT = /^nextval\('(?:[^']|'')*'::regclass\)$/;
+
 function buildPostgresCreateTable(
   schema: string,
   name: string,
   columns: ColumnInfo[],
 ): string {
   const colLines = columns.map((c) => {
-    const parts = [qiCore("postgres", c.name), c.dataType];
+    const serial =
+      c.default != null && NEXTVAL_DEFAULT.test(c.default.trim())
+        ? SERIAL_FOR_TYPE[c.dataType]
+        : undefined;
+    const parts = [qiCore("postgres", c.name), serial ?? c.dataType];
     if (!c.nullable) parts.push("NOT NULL");
-    if (c.default != null) parts.push(`DEFAULT ${c.default}`);
+    if (c.default != null && !serial) parts.push(`DEFAULT ${c.default}`);
     return "  " + parts.join(" ");
   });
   const pk = columns.filter((c) => c.isPrimaryKey).map((c) => qiCore("postgres", c.name));

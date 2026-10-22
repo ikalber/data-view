@@ -61,11 +61,12 @@ export const tauriTransport: Transport = {
   describeTable: (connectionId, schema, name) =>
     call<TableDetails>("describe_table", { connectionId, schema, name }),
   runQuery: (connectionId, sql, options) =>
-    // The Rust side doesn't honor `schema` yet — it's ignored downstream.
+    // `schema` → search_path (Postgres) / USE (MySQL); ignored on SQL Server,
+    // whose "schemas" live inside the connection's database. Bound `params`
+    // aren't supported by the Rust drivers (the UI doesn't send any).
     call<QueryResult>("run_query", {
       connectionId,
       sql,
-      params: options?.params,
       schema: options?.schema,
     }),
   fetchTableData: (connectionId, schema, name, options?: PageOptions) =>
@@ -95,6 +96,7 @@ export const tauriTransport: Transport = {
     call<void>("create_index", { connectionId, options }),
   dropIndex: (connectionId, options: DropIndexOptions) =>
     call<void>("drop_index", { connectionId, options }),
+  saveTextFile: (suggestedName, contents) => saveTextFile(suggestedName, contents),
   exportDatabase: async (connectionId, options: ExportDatabaseOptions) => {
     const targetPath = await pickSaveLocation("database", "sql");
     if (!targetPath) throw new ExportCancelled();
@@ -128,6 +130,33 @@ export async function pickAndReadSqlFile(): Promise<{
   const sql = await call<string>("read_text_file", { path });
   const base = path.split(/[\\/]/).pop() ?? "abierto.sql";
   return { name: base, sql };
+}
+
+/**
+ * Desktop replacement for a Blob + `<a download>` download (which the Tauri
+ * webview cancels on macOS and silently drops into ~/Downloads on Linux):
+ * asks where to save with the OS dialog and writes the text from Rust.
+ * Returns the chosen path, or `null` if the user cancelled the dialog.
+ */
+export async function saveTextFile(
+  suggestedName: string,
+  contents: string,
+): Promise<string | null> {
+  const ext = suggestedName.includes(".")
+    ? suggestedName.slice(suggestedName.lastIndexOf(".") + 1)
+    : "";
+  const path = await save({
+    defaultPath: suggestedName,
+    filters: ext
+      ? [
+          { name: ext.toUpperCase(), extensions: [ext] },
+          { name: "Todos", extensions: ["*"] },
+        ]
+      : undefined,
+  });
+  if (!path) return null;
+  await call<number>("write_text_file", { path, contents });
+  return path;
 }
 
 export class ExportCancelled extends Error {

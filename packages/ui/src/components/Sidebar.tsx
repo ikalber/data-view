@@ -11,6 +11,7 @@ import type {
   Tag,
 } from "@data-view/core";
 import { useTransport } from "../transport-context";
+import { useIsomorphicLayoutEffect } from "../use-isomorphic-layout-effect";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type { WorkspaceTab, WorkspaceTabKind } from "./workspace-tab";
 
@@ -74,11 +75,14 @@ interface Props {
   /** Trigger TRUNCATE on the given table (parent handles confirmation). */
   onTruncateTable?: (schema: string, name: string) => void;
   /** Generate a SELECT/INSERT/UPDATE/DELETE skeleton, or the full CREATE
-   * TABLE DDL, and seed it into the SQL editor. */
+   * TABLE DDL, and seed it into the SQL editor. `connectionId` is the
+   * connection the table belongs to (relevant in the global tree, where it
+   * can differ from the active one when the callback was created). */
   onGenerateSql?: (
     schema: string,
     name: string,
     kind: "select" | "insert" | "update" | "delete" | "ddl",
+    connectionId?: string,
   ) => void;
   /** Abre el formulario de edición para la conexión indicada. */
   onEditConnection?: (id: string) => void;
@@ -87,6 +91,8 @@ interface Props {
   /** Bumped by the parent after a create-schema/create-table action so the
    * sidebar refetches schemas and relations without losing local state. */
   refreshToken?: number;
+  /** Version shown in the footer; hidden when omitted. */
+  appVersion?: string;
 }
 
 interface NavItem {
@@ -140,6 +146,7 @@ export function Sidebar({
   onEditConnection,
   onDeleteConnection,
   refreshToken = 0,
+  appVersion,
 }: Props) {
   const transport = useTransport();
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
@@ -150,7 +157,10 @@ export function Sidebar({
   const [loadingSchemas, setLoadingSchemas] = useState(false);
   const [loadingRelations, setLoadingRelations] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>(() => readInitialMode());
+  // Starts at the default and is read from localStorage after mount: reading
+  // it during the first render made the web's SSR markup differ from the
+  // client's (hydration error whenever tree mode was saved).
+  const [mode, setModeState] = useState<Mode>("select");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [treeRelations, setTreeRelations] = useState<
     Record<string, RelationInfo[]>
@@ -158,6 +168,11 @@ export function Sidebar({
   const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
   const [treeSearch, setTreeSearch] = useState("");
   const pickerRef = useRef<HTMLDivElement>(null);
+  // Bumped whenever `treeRelations` is reset (connection switch / refresh) so
+  // a slow listRelations started before the reset can't write the previous
+  // connection's tables into the new cache (schema names like "public"
+  // repeat across connections).
+  const treeGenRef = useRef(0);
 
   // Right-click context menu state. `target` describes what was clicked so we
   // can build the appropriate item list at render time. `connectionId` se usa
@@ -206,7 +221,9 @@ export function Sidebar({
     isSystem: boolean,
     targetConnectionId?: string,
   ) {
-    if (isSystem && !onCreateTable) return;
+    // Neither action applies to system schemas: bail out before
+    // preventDefault so we don't open an empty menu.
+    if (isSystem) return;
     if (!onDropDatabase && !onCreateTable) return;
     e.preventDefault();
     setContextMenu({
@@ -267,6 +284,9 @@ export function Sidebar({
       }
       return items;
     }
+    // Connection the clicked item belongs to (the global tree tags items with
+    // it; the per-connection views use the active one).
+    const targetConn = target.connectionId ?? connectionId ?? undefined;
     if (target.kind === "table") {
       const items: ContextMenuItem[] = [
         {
@@ -285,43 +305,18 @@ export function Sidebar({
         },
       ];
       if (onGenerateSql) {
+        const generate =
+          (kind: "select" | "insert" | "update" | "delete" | "ddl") => () =>
+            ensureActive(() =>
+              onGenerateSql(target.schema, target.name, kind, targetConn),
+            );
         items.push(
           { separator: true },
-          {
-            label: "Generar CREATE TABLE",
-            onClick: () =>
-              ensureActive(() =>
-                onGenerateSql(target.schema, target.name, "ddl"),
-              ),
-          },
-          {
-            label: "Generar SELECT",
-            onClick: () =>
-              ensureActive(() =>
-                onGenerateSql(target.schema, target.name, "select"),
-              ),
-          },
-          {
-            label: "Generar INSERT",
-            onClick: () =>
-              ensureActive(() =>
-                onGenerateSql(target.schema, target.name, "insert"),
-              ),
-          },
-          {
-            label: "Generar UPDATE",
-            onClick: () =>
-              ensureActive(() =>
-                onGenerateSql(target.schema, target.name, "update"),
-              ),
-          },
-          {
-            label: "Generar DELETE",
-            onClick: () =>
-              ensureActive(() =>
-                onGenerateSql(target.schema, target.name, "delete"),
-              ),
-          },
+          { label: "Generar CREATE TABLE", onClick: generate("ddl") },
+          { label: "Generar SELECT", onClick: generate("select") },
+          { label: "Generar INSERT", onClick: generate("insert") },
+          { label: "Generar UPDATE", onClick: generate("update") },
+          { label: "Generar DELETE", onClick: generate("delete") },
         );
       }
       if (onTruncateTable || onDropTable) {
@@ -356,9 +351,11 @@ export function Sidebar({
       });
     }
     if (onDropDatabase && !target.isSystem) {
+      const targetDriver =
+        connections.find((c) => c.id === targetConn)?.driver ?? driver;
       if (items.length > 0) items.push({ separator: true });
       items.push({
-        label: `DROP ${driver === "mysql" ? "database" : "schema"}…`,
+        label: `DROP ${targetDriver === "mysql" ? "database" : "schema"}…`,
         destructive: true,
         onClick: () => ensureActive(() => onDropDatabase(target.schema)),
       });
@@ -412,14 +409,19 @@ export function Sidebar({
     [onOpenConnectionOverview, onOpenSql, onOpenSchema, onOpenHistory],
   );
 
-  // Persist mode preference
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
+    const stored = readInitialMode();
+    if (stored !== "select") setModeState(stored);
+  }, []);
+
+  function setMode(next: Mode) {
+    setModeState(next);
     try {
-      window.localStorage.setItem(MODE_KEY, mode);
+      window.localStorage.setItem(MODE_KEY, next);
     } catch {
       /* ignore */
     }
-  }, [mode]);
+  }
 
   // Load list of schemas/databases when connection changes.
   useEffect(() => {
@@ -452,8 +454,10 @@ export function Sidebar({
 
   // Reset cached tree relations when connection changes.
   useEffect(() => {
+    treeGenRef.current += 1;
     setTreeRelations({});
     setExpanded(new Set());
+    setLoadingSchema(null);
   }, [connectionId]);
 
   // After a create-schema/create-table the parent bumps refreshToken; drop
@@ -461,7 +465,9 @@ export function Sidebar({
   // already-expanded schema reloads via the activeSchema effect above.
   useEffect(() => {
     if (refreshToken === 0) return;
+    treeGenRef.current += 1;
     setTreeRelations({});
+    setLoadingSchema(null);
   }, [refreshToken]);
 
   // Load tables for the active schema (used by select mode and to highlight
@@ -503,7 +509,12 @@ export function Sidebar({
 
   // Close picker on click-outside / Esc.
   useEffect(() => {
-    if (!pickerOpen) return;
+    if (!pickerOpen) {
+      // A leftover filter would silently hide entries next time (and the
+      // search box only shows up for long lists).
+      setPickerFilter("");
+      return;
+    }
     const onClick = (e: MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setPickerOpen(false);
@@ -564,14 +575,19 @@ export function Sidebar({
       return next;
     });
     if (!treeRelations[name] && connectionId) {
+      const gen = treeGenRef.current;
       setLoadingSchema(name);
       try {
         const rels = await transport.listRelations(connectionId, name);
+        if (gen !== treeGenRef.current) return;
         setTreeRelations((r) => ({ ...r, [name]: rels }));
       } catch (e) {
+        if (gen !== treeGenRef.current) return;
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        setLoadingSchema((prev) => (prev === name ? null : prev));
+        if (gen === treeGenRef.current) {
+          setLoadingSchema((prev) => (prev === name ? null : prev));
+        }
       }
     }
   }
@@ -600,8 +616,10 @@ export function Sidebar({
   }
 
   // ── Global tree: lazy loaders + grouping helpers ─────────────────────────
-  async function loadGlobalSchemas(connId: string) {
-    if (globalSchemaCache[connId]) return;
+  // `force` re-fetches even when cached (after a create/drop); the old data
+  // stays visible until the new one arrives.
+  async function loadGlobalSchemas(connId: string, force = false) {
+    if (!force && globalSchemaCache[connId]) return;
     setGlobalLoadingConn((prev) => {
       const next = new Set(prev);
       next.add(connId);
@@ -629,13 +647,23 @@ export function Sidebar({
     }
   }
 
-  async function loadGlobalRelations(connId: string, schema: string) {
+  async function loadGlobalRelations(
+    connId: string,
+    schema: string,
+    force = false,
+  ) {
     const key = `${connId}|${schema}`;
-    if (globalRelCache[key]) return;
+    if (!force && globalRelCache[key]) return;
     setGlobalLoadingSchema((prev) => {
       const next = new Set(prev);
       next.add(key);
       return next;
+    });
+    // Clear a previous failure so a successful retry doesn't keep showing it.
+    setGlobalError((e) => {
+      if (!e[key]) return e;
+      const { [key]: _omit, ...rest } = e;
+      return rest;
     });
     try {
       const list = await transport.listRelations(connId, schema);
@@ -734,6 +762,32 @@ export function Sidebar({
     }
     return map;
   }, [connections, folders]);
+
+  // Create/drop/truncate bump refreshToken. The global tree has its own
+  // caches, which kept showing dropped tables and missing new ones: reload
+  // what's visible for the active connection and forget the rest so the next
+  // expand fetches fresh data.
+  useEffect(() => {
+    if (refreshToken === 0 || !connectionId) return;
+    const prefix = `${connectionId}|`;
+    const expandedKeys = [...globalExpandedSchemas].filter((k) =>
+      k.startsWith(prefix),
+    );
+    setGlobalRelCache((c) => {
+      const next: Record<string, RelationInfo[]> = {};
+      for (const [k, v] of Object.entries(c)) {
+        if (!k.startsWith(prefix) || expandedKeys.includes(k)) next[k] = v;
+      }
+      return next;
+    });
+    if (globalSchemaCache[connectionId]) {
+      void loadGlobalSchemas(connectionId, true);
+    }
+    for (const key of expandedKeys) {
+      void loadGlobalRelations(connectionId, key.slice(prefix.length), true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken]);
 
   // Auto-expand the active connection the first time we enter global mode so
   // the user lands oriented rather than facing a fully-collapsed tree.
@@ -963,7 +1017,7 @@ export function Sidebar({
               </button>
             )}
           </div>
-          {activeSchema && relations.length > 8 && (
+          {activeSchema && (relations.length > 8 || filter) && (
             <div className="dv-tables-search">
               <input
                 type="search"
@@ -1251,7 +1305,7 @@ export function Sidebar({
             ? `${relations.length} tablas`
             : `${userSchemas.length} ${pickerLabel.toLowerCase()}s`}
         </span>
-        <span>v0.1.9</span>
+        {appVersion && <span>{`v${appVersion}`}</span>}
       </div>
       {contextMenu && (
         <ContextMenu

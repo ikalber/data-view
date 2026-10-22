@@ -17,7 +17,7 @@ export function findUserByEmail(email: string): UserRow | null {
   return (
     getDb()
       .prepare<[string], UserRow>("SELECT * FROM users WHERE email = ?")
-      .get(email.toLowerCase()) ?? null
+      .get(email.trim().toLowerCase()) ?? null
   );
 }
 

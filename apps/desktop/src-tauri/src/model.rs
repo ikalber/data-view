@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DriverKind {
     Postgres,
@@ -10,12 +10,11 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "postgres" => Some(Self::Postgres),
-            "mysql" => Some(Self::Mysql),
-            "mssql" => Some(Self::Mssql),
-            _ => None,
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Mysql => "mysql",
+            Self::Mssql => "mssql",
         }
     }
 }
@@ -150,6 +149,7 @@ pub struct ResolvedConnection {
 pub struct TestConnectionResult {
     pub ok: bool,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
 }
 
@@ -160,7 +160,7 @@ pub struct SchemaInfo {
     pub is_system: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationKind {
     Table,
@@ -193,6 +193,8 @@ pub struct ColumnInfo {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub default: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -200,8 +202,11 @@ pub struct ColumnInfo {
 pub struct DatabaseSummary {
     pub name: String,
     pub is_system: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub relation_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
 }
 
@@ -209,13 +214,21 @@ pub struct DatabaseSummary {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionOverview {
     pub driver: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_database: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_connections: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_connections: Option<u64>,
     pub databases: Vec<DatabaseSummary>,
 }
@@ -275,6 +288,9 @@ pub struct QueryResult {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageOptions {
+    /// Present in the TS type but redundant here: `fetch_table_data` already
+    /// receives the schema as its own argument.
+    #[allow(dead_code)]
     pub schema: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,

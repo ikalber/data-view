@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-const STORAGE_KEY = "dbview.queryHistory.v1";
-const MAX_ENTRIES = 200;
+export const HISTORY_STORAGE_KEY = "dbview.queryHistory.v1";
+export const MAX_HISTORY_ENTRIES = 200;
 
 export type HistoryStatus = "ok" | "error";
 
@@ -31,16 +31,15 @@ export interface RecordEntryInput {
   error?: string;
 }
 
-function readAll(): QueryHistoryEntry[] {
-  if (typeof window === "undefined") return [];
+/** Parse the stored JSON, dropping anything malformed. Never throws. */
+export function parseHistory(raw: string | null): QueryHistoryEntry[] {
+  if (!raw) return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
       (e): e is QueryHistoryEntry =>
-        e &&
+        !!e &&
         typeof e === "object" &&
         typeof e.id === "string" &&
         typeof e.connectionId === "string" &&
@@ -53,14 +52,34 @@ function readAll(): QueryHistoryEntry[] {
   }
 }
 
+function readAll(): QueryHistoryEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return parseHistory(window.localStorage.getItem(HISTORY_STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
 function writeAll(entries: QueryHistoryEntry[]) {
   if (typeof window === "undefined") return;
+  // When storage is full (big scripts, saved SQL files…) drop the oldest half
+  // and retry instead of silently never recording history again.
+  let list = entries;
+  for (;;) {
+    try {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
+      break;
+    } catch {
+      if (list.length <= 1) return;
+      list = list.slice(0, Math.ceil(list.length / 2));
+    }
+  }
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
     // Notify listeners in the same tab — `storage` only fires cross-tab.
     window.dispatchEvent(new CustomEvent("dbview:history-changed"));
   } catch {
-    /* quota / serialization — ignore */
+    /* ignore */
   }
 }
 
@@ -84,7 +103,7 @@ export function recordHistoryEntry(input: RecordEntryInput): QueryHistoryEntry {
     status: input.status,
     error: input.error,
   };
-  const next = [entry, ...readAll()].slice(0, MAX_ENTRIES);
+  const next = [entry, ...readAll()].slice(0, MAX_HISTORY_ENTRIES);
   writeAll(next);
   return entry;
 }
@@ -95,7 +114,7 @@ export function useQueryHistory() {
   useEffect(() => {
     const sync = () => setEntries(readAll());
     const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) sync();
+      if (e.key === HISTORY_STORAGE_KEY) sync();
     };
     window.addEventListener("dbview:history-changed", sync);
     window.addEventListener("storage", onStorage);

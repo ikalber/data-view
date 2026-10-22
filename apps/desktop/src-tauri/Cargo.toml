@@ -44,8 +44,12 @@ argon2 = "0.5"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
-tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono"] }
+tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+# TLS for Postgres. Already in the dependency graph through mysql_async, so
+# this adds no new crates.
+rustls = "0.23"
+tokio-rustls = "0.26"
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 
 [features]

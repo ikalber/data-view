@@ -101,7 +101,20 @@ export function QueryEditor({
   const dbMenuRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<SqlEditorHandle>(null);
 
-  const dbLabel = driver === "postgres" ? "Schema" : "Database";
+  // The picker lists what `listSchemas` returns: databases on MySQL, schemas
+  // on Postgres and SQL Server.
+  const dbLabel = driver === "mysql" ? "Database" : "Schema";
+  // SQL Server can't switch the default schema of a session (the adapters'
+  // `USE [x]` expects a database, and `USE [dbo]` fails), so there the pick
+  // only scopes autocomplete; queries run with the connection's defaults.
+  const appliesSchema = driver !== "mssql";
+  const runOptions = useMemo(
+    () => ({ schema: appliesSchema ? database ?? undefined : undefined }),
+    [appliesSchema, database],
+  );
+  // Bumped whenever an in-flight result must be discarded (connection
+  // change); each run compares against it before touching state.
+  const runIdRef = useRef(0);
   const userSchemas = useMemo(
     () => schemas.filter((s) => !s.isSystem),
     [schemas],
@@ -179,10 +192,10 @@ export function QueryEditor({
     const text = selection && selection.length > 0 ? selection : sql;
     if (!text.trim()) return;
     setRuntime((r) => ({ result: r.result, error: null, running: true }));
+    const runId = ++runIdRef.current;
     try {
-      const result = await transport.runQuery(connectionId, text, {
-        schema: database ?? undefined,
-      });
+      const result = await transport.runQuery(connectionId, text, runOptions);
+      if (runId !== runIdRef.current) return;
       setRuntime({ result, error: null, running: false });
       recordHistoryEntry({
         connectionId,
@@ -194,6 +207,7 @@ export function QueryEditor({
         truncated: result.truncated,
       });
     } catch (e) {
+      if (runId !== runIdRef.current) return;
       const message = e instanceof Error ? e.message : String(e);
       setRuntime({ result: null, error: message, running: false });
       recordHistoryEntry({
@@ -203,7 +217,7 @@ export function QueryEditor({
         error: message,
       });
     }
-  }, [runtime.running, transport, connectionId, sql, database]);
+  }, [runtime.running, transport, connectionId, sql, runOptions]);
 
   const saveActive = useCallback(() => {
     onSave({ tabId, title, sql, fileId });
@@ -211,6 +225,7 @@ export function QueryEditor({
 
   // Keep the runtime relevant when the connection or SQL is dropped.
   useEffect(() => {
+    runIdRef.current++;
     setRuntime({ result: null, error: null, running: false });
   }, [connectionId]);
 
@@ -255,26 +270,29 @@ export function QueryEditor({
     const source = selection && selection.length > 0 ? selection : sql;
     if (!source.trim()) return;
     // Strip a leading EXPLAIN if the user already typed one so we don't end
-    // up with "EXPLAIN EXPLAIN …". MSSQL uses SET SHOWPLAN_TEXT ON which is
-    // session-scoped and doesn't compose cleanly here — we use the same
-    // EXPLAIN keyword on all three drivers; on MSSQL it falls back to the
-    // server's "Showplan All" approximation via SET SHOWPLAN_ALL.
+    // up with "EXPLAIN EXPLAIN …".
     const cleaned = source.replace(/^\s*explain\s+/i, "").trim();
+    // SQL Server has no EXPLAIN: the estimated plan comes from
+    // SET SHOWPLAN_ALL ON, which returns the whole plan as one result set
+    // (SHOWPLAN_TEXT would put it in a second one). The server requires the
+    // SET to be alone in its batch, so the adapter has to run that leading
+    // statement as a separate batch on the same session.
     const wrapped =
       driver === "mssql"
-        ? `SET SHOWPLAN_TEXT ON;\n${cleaned}`
+        ? `SET SHOWPLAN_ALL ON;\n${cleaned}`
         : `EXPLAIN ${cleaned}`;
     setRuntime({ result: null, error: null, running: true });
+    const runId = ++runIdRef.current;
     try {
-      const result = await transport.runQuery(connectionId, wrapped, {
-        schema: database ?? undefined,
-      });
+      const result = await transport.runQuery(connectionId, wrapped, runOptions);
+      if (runId !== runIdRef.current) return;
       setRuntime({ result, error: null, running: false });
     } catch (e) {
+      if (runId !== runIdRef.current) return;
       const message = e instanceof Error ? e.message : String(e);
       setRuntime({ result: null, error: message, running: false });
     }
-  }, [sql, runtime.running, driver, transport, connectionId, database]);
+  }, [sql, runtime.running, driver, transport, connectionId, runOptions]);
 
   return (
     <div className="dv-sql-pane">
@@ -292,9 +310,15 @@ export function QueryEditor({
             aria-haspopup="listbox"
             aria-expanded={dbPickerOpen}
             title={
-              database
+              !appliesSchema
+                ? `Schema usado para el autocompletado — SQL Server ejecuta con el schema por defecto del usuario (calificá las tablas: ${database ?? "dbo"}.tabla)`
+                : database
                 ? `Ejecutar en ${dbLabel.toLowerCase()} "${database}"`
-                : `Sin ${dbLabel.toLowerCase()} seleccionada — usa el default de la conexión`
+                : `${
+                    driver === "mysql"
+                      ? "Sin database seleccionada"
+                      : "Sin schema seleccionado"
+                  } — usa el default de la conexión`
             }
           >
             <span className="dv-sql-db-trigger-icon">⛁</span>

@@ -24,8 +24,9 @@ import type {
 
 const QUERY_LIMIT = 5000;
 
-async function withPool<T>(c: ResolvedConnection, fn: (pool: sql.ConnectionPool) => Promise<T>): Promise<T> {
-  const pool = await new sql.ConnectionPool({
+function poolConfig(c: ResolvedConnection, requestTimeout = 60_000): sql.config {
+  const trust = c.options?.trustServerCertificate;
+  return {
     server: c.host,
     port: c.port,
     user: c.username,
@@ -33,12 +34,23 @@ async function withPool<T>(c: ResolvedConnection, fn: (pool: sql.ConnectionPool)
     database: c.database,
     options: {
       encrypt: !!c.ssl,
-      trustServerCertificate: c.options?.trustServerCertificate === "true",
+      // Same trust model as the Postgres adapter (rejectUnauthorized: false):
+      // the UI only has an SSL switch, and SQL Server ships with a
+      // self-signed certificate, so verification made "SSL on" always fail.
+      // `options.trustServerCertificate = "false"` opts back into it.
+      trustServerCertificate: trust != null ? trust === "true" : true,
       ...(c.options?.instanceName ? { instanceName: c.options.instanceName } : {}),
     },
+    // One connection per short-lived pool, so consecutive batches (GO) share
+    // the session (temp tables, SET options, USE).
+    pool: { min: 0, max: 1 },
     connectionTimeout: 10_000,
-    requestTimeout: 60_000,
-  }).connect();
+    requestTimeout,
+  };
+}
+
+async function withPool<T>(c: ResolvedConnection, fn: (pool: sql.ConnectionPool) => Promise<T>): Promise<T> {
+  const pool = await new sql.ConnectionPool(poolConfig(c)).connect();
   try {
     return await fn(pool);
   } finally {
@@ -50,12 +62,164 @@ function ident(name: string) {
   return `[${name.replace(/]/g, "]]")}]`;
 }
 
-function normalizeCell(v: unknown) {
+/** SQL Server often reports the real cause in an earlier message and ends
+ * with a generic one ("Could not create constraint or index. See previous
+ * errors."); mssql only puts the last one in `message`. Fold them together
+ * and add the line number for multi-line scripts. */
+function enrichMssqlError(e: unknown, sqlText?: string, lineOffset = 0): unknown {
+  if (!(e instanceof Error)) return e;
+  const me = e as Error & { precedingErrors?: Array<{ message?: string }>; lineNumber?: number };
+  const messages = (me.precedingErrors ?? [])
+    .map((p) => p.message)
+    .filter((m): m is string => !!m && m !== me.message);
+  const parts = [...messages, me.message];
+  if (sqlText?.includes("\n") && typeof me.lineNumber === "number" && me.lineNumber > 0) {
+    parts.push(`Line ${me.lineNumber + lineOffset}`);
+  }
+  me.message = parts.join("\n");
+  return me;
+}
+
+function pad(n: number, width = 2) {
+  return String(n).padStart(width, "0");
+}
+
+/** tedious hands back every temporal type as a JS Date (UTC-based, since
+ * mssql's `useUTC` is on). Render them like the server does instead of a
+ * full ISO timestamp — a `time` column showed "1970-01-01T23:59:58.000Z" and
+ * a `date` "2024-01-15T00:00:00.000Z". */
+function formatTemporal(d: Date, typeName: string): string {
+  const ms = d.getUTCMilliseconds();
+  const frac = ms ? `.${pad(ms, 3)}` : "";
+  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${frac}`;
+  switch (typeName) {
+    case "Date":
+      return date;
+    case "Time":
+      return time;
+    case "DateTimeOffset":
+      return d.toISOString();
+    default:
+      return `${date} ${time}`;
+  }
+}
+
+function normalizeCell(v: unknown, typeName = "") {
   if (v === null || v === undefined) return null;
   if (Buffer.isBuffer(v)) return { __binary: true as const, bytes: v.length };
-  if (v instanceof Date) return v.toISOString();
+  if (v instanceof Date) return formatTemporal(v, typeName);
   if (typeof v === "object") return JSON.stringify(v);
   return v as string | number | boolean;
+}
+
+interface MssqlColumnMeta {
+  name: string;
+  type?: { name?: string };
+}
+
+function columnsOf(recordset: unknown): MssqlColumnMeta[] {
+  const cols = (recordset as { columns?: unknown } | undefined)?.columns;
+  if (!cols) return [];
+  // arrayRowMode gives an array; object mode a name-keyed map.
+  return (Array.isArray(cols) ? cols : Object.values(cols)) as MssqlColumnMeta[];
+}
+
+function typeNameOf(col: MssqlColumnMeta) {
+  return col.type?.name ?? "unknown";
+}
+
+/**
+ * Split a script into batches on `GO` lines (an SSMS/sqlcmd convention the
+ * server doesn't understand), and run a leading `SET SHOWPLAN_* ON` on its
+ * own since T-SQL requires it to be alone in its batch (the editor's EXPLAIN
+ * sends `SET SHOWPLAN_ALL ON;\n<query>`). Both run on the same physical
+ * connection (pool max 1), which is closed afterwards, so no `… OFF` needed.
+ */
+function splitBatches(sqlText: string): Array<{ text: string; lineOffset: number }> {
+  const out: Array<{ text: string; lineOffset: number }> = [];
+  let current: string[] = [];
+  let start = 0;
+  const lines = sqlText.split("\n");
+  lines.forEach((line, i) => {
+    if (/^\s*GO\s*;?\s*$/i.test(line)) {
+      out.push({ text: current.join("\n"), lineOffset: start });
+      current = [];
+      start = i + 1;
+    } else {
+      current.push(line);
+    }
+  });
+  out.push({ text: current.join("\n"), lineOffset: start });
+  const batches = out.filter((b) => b.text.trim() !== "");
+  const first = batches[0];
+  const showplan = first && /^\s*(SET\s+SHOWPLAN_(?:TEXT|ALL|XML)\s+ON)\s*;?/i.exec(first.text);
+  if (first && showplan && first.text.slice(showplan[0].length).trim() !== "") {
+    const rest = first.text.slice(showplan[0].length);
+    batches.splice(0, 1, { text: showplan[1]!, lineOffset: first.lineOffset }, {
+      text: rest,
+      lineOffset: first.lineOffset + showplan[0].split("\n").length - 1,
+    });
+  }
+  return batches.length > 0 ? batches : [{ text: sqlText, lineOffset: 0 }];
+}
+
+async function runMssql(c: ResolvedConnection, sqlText: string, maxRows: number): Promise<QueryResult> {
+  const start = Date.now();
+  return withPool(c, async (pool) => {
+    let lastSet: unknown[][] | undefined;
+    let lastCols: MssqlColumnMeta[] = [];
+    let affected: number | null = null;
+    for (const batch of splitBatches(sqlText)) {
+      const req = pool.request();
+      req.arrayRowMode = true;
+      let r: sql.IResult<unknown>;
+      try {
+        // batch() sends a plain SQL batch; query() wraps it in sp_executesql,
+        // which scopes SET options / #temp tables to that one call, so they
+        // wouldn't reach the next GO batch.
+        r = await req.batch(batch.text);
+      } catch (e) {
+        throw enrichMssqlError(e, sqlText, batch.lineOffset);
+      }
+      const sets = (r.recordsets ?? []) as unknown as unknown[][][];
+      if (sets.length > 0) {
+        lastSet = sets[sets.length - 1];
+        lastCols = columnsOf(lastSet);
+      }
+      for (const n of r.rowsAffected ?? []) affected = (affected ?? 0) + n;
+    }
+    if (lastSet) {
+      // Show the last row set, like the Postgres/MySQL adapters. SQL Server
+      // also counts SELECTed rows in rowsAffected, so that isn't "affected".
+      const truncated = lastSet.length > maxRows;
+      const types = lastCols.map(typeNameOf);
+      const rows = (truncated ? lastSet.slice(0, maxRows) : lastSet).map((row) =>
+        row.map((v, i) => normalizeCell(v, types[i])),
+      );
+      return {
+        columns: lastCols.map((col, i) => ({ name: col.name, dataType: types[i]! })),
+        rows: rows as QueryResult["rows"],
+        rowCount: rows.length,
+        affectedRows: null,
+        durationMs: Date.now() - start,
+        truncated,
+      };
+    }
+    return {
+      columns: [],
+      rows: [],
+      rowCount: 0,
+      affectedRows: affected,
+      durationMs: Date.now() - start,
+      truncated: false,
+    };
+  });
+}
+
+function toInt(v: unknown, fallback: number) {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 export const mssqlDriver: DriverAdapter = {
@@ -97,65 +261,81 @@ export const mssqlDriver: DriverAdapter = {
       const req = pool.request();
       const where = schema ? "AND s.name = @schema" : "";
       if (schema) req.input("schema", sql.NVarChar, schema);
-      // Sizes from dm_db_partition_stats (8 KB pages) — only meaningful for
-      // user tables. Views report no size; left-join nulls render as "—".
+      // Sizes from sys.partitions + sys.allocation_units (8 KB pages), which
+      // only need metadata visibility — sys.dm_db_partition_stats requires
+      // VIEW DATABASE STATE. Heap/clustered (index_id 0/1) is data, the rest
+      // are secondary indexes. Views report no size; nulls render as "—".
       const r = await req.query<{
         schema: string;
         name: string;
         kind: string;
-        approx_rows: number | null;
-        total_pages: number | null;
-        used_pages: number | null;
+        approx_rows: number | string | null;
+        total_pages: number | string | null;
+        data_pages: number | string | null;
+        index_pages: number | string | null;
       }>(
         `SELECT s.name AS [schema], o.name AS name,
-                CASE o.type WHEN 'U' THEN 'table' WHEN 'V' THEN 'view' END AS kind,
-                ps.row_count AS approx_rows,
-                ps.total_pages AS total_pages,
-                ps.used_pages AS used_pages
+                CASE o.type WHEN 'V' THEN 'view' ELSE 'table' END AS kind,
+                pr.row_count AS approx_rows,
+                au.total_pages, au.data_pages, au.index_pages
          FROM sys.objects o
          JOIN sys.schemas s ON s.schema_id = o.schema_id
          OUTER APPLY (
-           SELECT SUM(p.rows) AS row_count,
-                  SUM(p.reserved_page_count) AS total_pages,
-                  SUM(p.used_page_count) AS used_pages
-           FROM sys.dm_db_partition_stats p
+           SELECT SUM(p.rows) AS row_count
+           FROM sys.partitions p
            WHERE p.object_id = o.object_id AND p.index_id IN (0, 1)
-         ) ps
+         ) pr
+         OUTER APPLY (
+           SELECT SUM(a.total_pages) AS total_pages,
+                  SUM(CASE WHEN p.index_id IN (0, 1) THEN a.total_pages ELSE 0 END) AS data_pages,
+                  SUM(CASE WHEN p.index_id > 1 THEN a.total_pages ELSE 0 END) AS index_pages
+           FROM sys.partitions p
+           JOIN sys.allocation_units a ON a.container_id = p.partition_id
+           WHERE p.object_id = o.object_id
+         ) au
          WHERE o.type IN ('U','V') ${where}
          ORDER BY s.name, o.name`,
       );
+      const bytes = (pages: number | string | null) =>
+        pages != null ? Number(pages) * 8192 : undefined;
       return r.recordset.map((row) => ({
         schema: row.schema,
         name: row.name,
-        kind: (row.kind ?? "table") as "table" | "view",
+        kind: row.kind as "table" | "view",
         approxRowCount: row.approx_rows != null ? Number(row.approx_rows) : undefined,
-        totalBytes: row.total_pages != null ? Number(row.total_pages) * 8192 : undefined,
-        dataBytes: row.used_pages != null ? Number(row.used_pages) * 8192 : undefined,
+        totalBytes: bytes(row.total_pages),
+        dataBytes: bytes(row.data_pages),
+        indexBytes: bytes(row.index_pages),
       }));
     });
   },
 
   async getConnectionOverview(c) {
     return withPool(c, async (pool) => {
+      // CURRENT_USER is a keyword, so the alias must be bracketed. Uptime is
+      // derived from tempdb's creation (recreated at startup) because
+      // sys.dm_os_sys_info needs VIEW SERVER STATE.
       const meta = await pool.request().query<{
         version: string;
         current_database: string;
         current_user: string;
         server_time: Date;
         uptime_seconds: number | null;
+        max_connections: number | null;
       }>(
         `SELECT @@VERSION AS version,
                 DB_NAME() AS current_database,
-                SUSER_SNAME() AS current_user,
+                SUSER_SNAME() AS [current_user],
                 SYSUTCDATETIME() AS server_time,
-                DATEDIFF(SECOND, sqlserver_start_time, SYSUTCDATETIME()) AS uptime_seconds
-         FROM sys.dm_os_sys_info`,
+                (SELECT DATEDIFF(SECOND, create_date, GETDATE())
+                 FROM sys.databases WHERE name = 'tempdb') AS uptime_seconds,
+                @@MAX_CONNECTIONS AS max_connections`,
       );
 
       // Sum sizes per database from sys.master_files (size is in 8 KB pages).
       const dbs = await pool.request().query<{
         name: string;
-        size_bytes: number | null;
+        size_bytes: number | string | null;
         is_system: number;
       }>(
         `SELECT d.name AS name,
@@ -192,6 +372,7 @@ export const mssqlDriver: DriverAdapter = {
         uptimeSeconds: m?.uptime_seconds != null ? Number(m.uptime_seconds) : undefined,
         activeConnections:
           activity.recordset[0]?.active != null ? Number(activity.recordset[0].active) : undefined,
+        maxConnections: m?.max_connections != null ? Number(m.max_connections) : undefined,
         totalSizeBytes: totalSizeBytes > 0 ? totalSizeBytes : undefined,
         databases,
       };
@@ -200,29 +381,60 @@ export const mssqlDriver: DriverAdapter = {
 
   async describeTable(c, schema, name) {
     return withPool(c, async (pool) => {
+      // sys.columns instead of information_schema: data_type there has no
+      // length/precision ("nvarchar", "decimal"), so a generated CREATE TABLE
+      // or the structure editor's ALTER COLUMN shrank columns to nvarchar(1)
+      // / decimal(18,0).
       const r = await pool
         .request()
         .input("schema", sql.NVarChar, schema)
         .input("name", sql.NVarChar, name)
         .query<{
           name: string;
-          data_type: string;
-          is_nullable: string;
+          type_name: string;
+          is_user_defined: boolean;
+          max_length: number;
+          precision: number;
+          scale: number;
+          is_nullable: boolean;
           column_default: string | null;
+          comment: string | null;
           is_pk: number;
+          is_unique: number;
+          object_type: string;
         }>(
-          `SELECT c.column_name AS name,
-                  c.data_type AS data_type,
-                  c.is_nullable AS is_nullable,
-                  c.column_default AS column_default,
-                  CASE WHEN kcu.column_name IS NOT NULL THEN 1 ELSE 0 END AS is_pk
-           FROM information_schema.columns c
-           LEFT JOIN information_schema.table_constraints tc
-             ON tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND tc.constraint_type = 'PRIMARY KEY'
-           LEFT JOIN information_schema.key_column_usage kcu
-             ON kcu.constraint_name = tc.constraint_name AND kcu.column_name = c.column_name
-           WHERE c.table_schema = @schema AND c.table_name = @name
-           ORDER BY c.ordinal_position`,
+          `SELECT c.name AS name,
+                  t.name AS type_name,
+                  t.is_user_defined,
+                  c.max_length, c.precision, c.scale,
+                  c.is_nullable,
+                  dc.definition AS column_default,
+                  CAST(ep.value AS nvarchar(4000)) AS comment,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM sys.indexes i
+                    JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                    WHERE i.object_id = c.object_id AND i.is_primary_key = 1 AND ic.column_id = c.column_id
+                  ) THEN 1 ELSE 0 END AS is_pk,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM sys.indexes i
+                    JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                    WHERE i.object_id = c.object_id AND i.is_unique = 1 AND i.is_primary_key = 0
+                      AND i.has_filter = 0 AND ic.column_id = c.column_id AND ic.is_included_column = 0
+                      AND (SELECT COUNT(*) FROM sys.index_columns k
+                           WHERE k.object_id = i.object_id AND k.index_id = i.index_id
+                             AND k.is_included_column = 0) = 1
+                  ) THEN 1 ELSE 0 END AS is_unique,
+                  o.type AS object_type
+           FROM sys.columns c
+           JOIN sys.objects o ON o.object_id = c.object_id
+           JOIN sys.schemas s ON s.schema_id = o.schema_id
+           JOIN sys.types t ON t.user_type_id = c.user_type_id
+           LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+           LEFT JOIN sys.extended_properties ep
+             ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id
+            AND ep.name = 'MS_Description'
+           WHERE s.name = @schema AND o.name = @name AND o.type IN ('U', 'V')
+           ORDER BY c.column_id`,
         );
       const idx = await pool
         .request()
@@ -262,28 +474,27 @@ export const mssqlDriver: DriverAdapter = {
         }
         entry.columns.push(row.column_name);
       }
-      // Foreign keys via sys.foreign_keys. STRING_AGG requires SQL Server
-      // 2017+ — the queries above also use modern syntax, so we don't bother
-      // with a backwards-compat fallback for older servers.
+      // Foreign keys: one row per column pair, grouped here (no STRING_AGG,
+      // so names containing commas survive and SQL Server 2016 works).
       const fks = await pool
         .request()
         .input("schema", sql.NVarChar, schema)
         .input("name", sql.NVarChar, name)
         .query<{
           name: string;
-          local_cols: string;
+          local_col: string;
           ref_schema: string;
           ref_table: string;
-          ref_cols: string;
+          ref_col: string;
           on_update: string;
           on_delete: string;
         }>(
           `SELECT
              fk.name AS name,
-             STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS local_cols,
+             c.name AS local_col,
              ref_s.name AS ref_schema,
              ref_t.name AS ref_table,
-             STRING_AGG(ref_c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_cols,
+             ref_c.name AS ref_col,
              fk.update_referential_action_desc AS on_update,
              fk.delete_referential_action_desc AS on_delete
            FROM sys.foreign_keys fk
@@ -295,133 +506,119 @@ export const mssqlDriver: DriverAdapter = {
            JOIN sys.tables tab ON tab.object_id = fk.parent_object_id
            JOIN sys.schemas sch ON sch.schema_id = tab.schema_id
            WHERE sch.name = @schema AND tab.name = @name
-           GROUP BY fk.name, ref_s.name, ref_t.name,
-                    fk.update_referential_action_desc,
-                    fk.delete_referential_action_desc
-           ORDER BY fk.name`,
+           ORDER BY fk.name, fkc.constraint_column_id`,
         );
-      const foreignKeys = fks.recordset.map((row) => ({
-        name: row.name,
-        columns: row.local_cols.split(","),
-        referencedSchema: row.ref_schema,
-        referencedTable: row.ref_table,
-        referencedColumns: row.ref_cols.split(","),
-        // sys.foreign_keys gives names like "NO_ACTION" — convert to the SQL
-        // form ("NO ACTION") so the generated DDL is valid as-is.
-        onUpdate: row.on_update?.replace("_", " ") || undefined,
-        onDelete: row.on_delete?.replace("_", " ") || undefined,
-      }));
+      const fkMap = new Map<string, TableFk>();
+      for (const row of fks.recordset) {
+        let fk = fkMap.get(row.name);
+        if (!fk) {
+          fk = {
+            name: row.name,
+            columns: [],
+            referencedSchema: row.ref_schema,
+            referencedTable: row.ref_table,
+            referencedColumns: [],
+            // sys.foreign_keys gives names like "NO_ACTION" — convert to the
+            // SQL form ("NO ACTION") so the generated DDL is valid as-is.
+            onUpdate: row.on_update?.replace("_", " ") || undefined,
+            onDelete: row.on_delete?.replace("_", " ") || undefined,
+          };
+          fkMap.set(row.name, fk);
+        }
+        fk.columns.push(row.local_col);
+        fk.referencedColumns.push(row.ref_col);
+      }
+      const isView = r.recordset[0]?.object_type?.trim() === "V";
       return {
         schema,
         name,
-        kind: "table" as const,
+        kind: isView ? ("view" as const) : ("table" as const),
         columns: r.recordset.map((row) => ({
           name: row.name,
-          dataType: row.data_type,
-          nullable: row.is_nullable === "YES",
+          dataType: mssqlTypeString(row),
+          nullable: Boolean(row.is_nullable),
           isPrimaryKey: row.is_pk === 1,
-          isUnique: false,
+          isUnique: row.is_unique === 1,
           default: row.column_default,
+          comment: row.comment,
         })),
         indexes: Array.from(indexMap.values()).sort((a, b) => {
           if (a.primary !== b.primary) return a.primary ? -1 : 1;
           if (a.unique !== b.unique) return a.unique ? -1 : 1;
           return a.name.localeCompare(b.name);
         }),
-        foreignKeys,
+        foreignKeys: Array.from(fkMap.values()),
       };
     });
   },
 
-  async runQuery(c, sqlText, options) {
-    const prefixed = options?.schema
-      ? `USE [${options.schema.replace(/]/g, "]]")}];\n${sqlText}`
-      : sqlText;
-    const start = Date.now();
-    return withPool(c, async (pool) => {
-      const req = pool.request();
-      req.arrayRowMode = true;
-      const r = await req.query(prefixed);
-      const cols = (r.recordset?.columns ? Object.values(r.recordset.columns) : []) as Array<{
-        name: string;
-        type: { name: string };
-      }>;
-      const rows = ((r.recordset as unknown as Array<unknown[]>) ?? []).map((row) =>
-        row.map(normalizeCell),
-      );
-      return {
-        columns: cols.map((c) => ({ name: c.name, dataType: c.type?.name ?? "unknown" })),
-        rows: rows as QueryResult["rows"],
-        rowCount: rows.length,
-        affectedRows: typeof r.rowsAffected?.[0] === "number" ? r.rowsAffected[0] : null,
-        durationMs: Date.now() - start,
-        truncated: rows.length === QUERY_LIMIT,
-      };
-    });
+  async runQuery(c, sqlText) {
+    // `options.schema` is intentionally ignored: the app's "schema" is a
+    // schema inside the current database (that's what listSchemas returns),
+    // and SQL Server has no per-session default schema to switch to. The
+    // old `USE [schema]` failed with "Database '…' does not exist".
+    return runMssql(c, sqlText, QUERY_LIMIT);
   },
 
   async fetchTableData(c, schema, name, options) {
-    const limit = Math.min(options?.limit ?? 100, QUERY_LIMIT);
-    const offset = options?.offset ?? 0;
+    const limit = Math.min(toInt(options?.limit, 100), QUERY_LIMIT);
+    const offset = toInt(options?.offset, 0);
     const orderBy = options?.orderBy?.length
-      ? options.orderBy.map((o) => `${ident(o.column)} ${o.direction.toUpperCase()}`).join(", ")
+      ? options.orderBy
+          .map((o) => `${ident(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`)
+          .join(", ")
       : "(SELECT NULL)";
     const where = options?.where?.trim() ? `WHERE ${options.where.trim()}` : "";
-    const sqlText = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
-    return this.runQuery(c, sqlText);
+    // One extra row tells `truncated` whether another page exists.
+    const sqlText = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${limit + 1} ROWS ONLY`;
+    return runMssql(c, sqlText, limit);
   },
 
   async *iterateTable(c, opts) {
-    // tiberius/mssql doesn't have a clean cursor API, so we OFFSET/FETCH-page
-    // through the table. We need a stable ORDER BY — fall back to ordering by
-    // the first column if no primary key is available.
+    // Stream a single SELECT (with back-pressure) instead of OFFSET/FETCH
+    // paging: paging ordered by only the first PK column (or the first
+    // column for heaps) skipped/duplicated rows whenever that column had
+    // ties, e.g. composite primary keys.
     const batchSize = Math.max(1, opts.batchSize ?? 1000);
     const where = opts.where?.trim() ? `WHERE ${opts.where.trim()}` : "";
-    const pool = await new sql.ConnectionPool({
-      server: c.host,
-      port: c.port,
-      user: c.username,
-      password: c.password,
-      database: c.database,
-      options: {
-        encrypt: !!c.ssl,
-        trustServerCertificate: c.options?.trustServerCertificate === "true",
-        ...(c.options?.instanceName ? { instanceName: c.options.instanceName } : {}),
-      },
-      connectionTimeout: 10_000,
-      requestTimeout: 600_000,
-    }).connect();
+    const pool = await new sql.ConnectionPool(poolConfig(c, 600_000)).connect();
+    const req = pool.request();
+    let finished = false;
     try {
-      // Discover an ORDER BY column — PK preferred, else first column. SQL
-      // Server requires this for OFFSET/FETCH.
-      const orderCol = await firstOrderingColumn(pool, opts.schema, opts.name);
-      const orderBy = orderCol ? ident(orderCol) : "(SELECT NULL)";
-      let offset = 0;
+      req.arrayRowMode = true;
       let columns: QueryResultColumn[] = [];
-      while (true) {
-        const req = pool.request();
-        req.arrayRowMode = true;
-        const r = await req.query(
-          `SELECT * FROM ${ident(opts.schema)}.${ident(opts.name)} ${where} ORDER BY ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${batchSize} ROWS ONLY`,
-        );
-        const cols = (r.recordset?.columns
-          ? Object.values(r.recordset.columns)
-          : []) as Array<{ name: string; type: { name: string } }>;
-        if (columns.length === 0) {
-          columns = cols.map((col) => ({
-            name: col.name,
-            dataType: col.type?.name ?? "unknown",
-          }));
+      let types: string[] = [];
+      req.on("recordset", (cols: unknown) => {
+        const list = (Array.isArray(cols) ? cols : Object.values(cols as object)) as MssqlColumnMeta[];
+        types = list.map(typeNameOf);
+        columns = list.map((col, i) => ({ name: col.name, dataType: types[i]! }));
+      });
+      const stream = req.toReadableStream({ highWaterMark: batchSize });
+      req
+        .query(`SELECT * FROM ${ident(opts.schema)}.${ident(opts.name)} ${where}`)
+        .catch(() => undefined); // errors surface through the stream
+      let batchRows: unknown[][] = [];
+      let yielded = false;
+      try {
+        for await (const row of stream as AsyncIterable<unknown[]>) {
+          batchRows.push(row.map((v, i) => normalizeCell(v, types[i])));
+          if (batchRows.length >= batchSize) {
+            yielded = true;
+            yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
+            batchRows = [];
+          }
         }
-        const rows = ((r.recordset as unknown as Array<unknown[]>) ?? []).map((row) =>
-          row.map(normalizeCell),
-        );
-        if (rows.length === 0) break;
-        yield { columns, rows: rows as QueryResult["rows"] } as TableBatch;
-        if (rows.length < batchSize) break;
-        offset += rows.length;
+      } catch (e) {
+        throw enrichMssqlError(e);
       }
+      // An empty table still yields one (empty) batch so exporters get the
+      // column list for headers.
+      if (batchRows.length > 0 || !yielded) {
+        yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
+      }
+      finished = true;
     } finally {
+      if (!finished) req.cancel();
       await pool.close().catch(() => undefined);
     }
   },
@@ -439,20 +636,23 @@ export const mssqlDriver: DriverAdapter = {
   },
 
   async createTable(c, options) {
-    const sqlText = buildMssqlCreateTableFromDraft(
-      options.schema,
-      options.name,
-      options.columns,
-      options.foreignKeys,
+    const statements = [
+      buildMssqlCreateTableFromDraft(
+        options.schema,
+        options.name,
+        options.columns,
+        options.foreignKeys,
+      ),
+      ...(options.indexes ?? []).map((idx) =>
+        buildMssqlCreateIndexSql({ schema: options.schema, table: options.name, ...idx }),
+      ),
+    ];
+    // One transaction (XACT_ABORT rolls back on any error) so a bad index
+    // doesn't leave a half-created table behind.
+    await this.runQuery(
+      c,
+      ["SET XACT_ABORT ON;", "BEGIN TRANSACTION;", ...statements, "COMMIT TRANSACTION;"].join("\n"),
     );
-    await this.runQuery(c, sqlText);
-    for (const idx of options.indexes ?? []) {
-      await this.createIndex(c, {
-        schema: options.schema,
-        table: options.name,
-        ...idx,
-      });
-    }
   },
 
   async createIndex(c, options) {
@@ -496,35 +696,47 @@ export const mssqlDriver: DriverAdapter = {
   },
 };
 
-async function firstOrderingColumn(
-  pool: sql.ConnectionPool,
-  schema: string,
-  name: string,
-): Promise<string | null> {
-  const r = await pool
-    .request()
-    .input("schema", sql.NVarChar, schema)
-    .input("name", sql.NVarChar, name)
-    .query<{ column_name: string }>(
-      `SELECT TOP 1 kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON kcu.constraint_name = tc.constraint_name
-       WHERE tc.constraint_type = 'PRIMARY KEY'
-         AND tc.table_schema = @schema AND tc.table_name = @name
-       ORDER BY kcu.ordinal_position`,
-    );
-  if (r.recordset[0]?.column_name) return r.recordset[0].column_name;
-  const r2 = await pool
-    .request()
-    .input("schema", sql.NVarChar, schema)
-    .input("name", sql.NVarChar, name)
-    .query<{ column_name: string }>(
-      `SELECT TOP 1 column_name FROM information_schema.columns
-       WHERE table_schema = @schema AND table_name = @name
-       ORDER BY ordinal_position`,
-    );
-  return r2.recordset[0]?.column_name ?? null;
+interface TableFk {
+  name: string;
+  columns: string[];
+  referencedSchema: string;
+  referencedTable: string;
+  referencedColumns: string[];
+  onUpdate?: string;
+  onDelete?: string;
+}
+
+/** Full T-SQL type from sys.columns / sys.types, e.g. `nvarchar(100)`,
+ * `varchar(max)`, `decimal(10,2)`, `datetime2(3)`. */
+function mssqlTypeString(col: {
+  type_name: string;
+  is_user_defined: boolean;
+  max_length: number;
+  precision: number;
+  scale: number;
+}): string {
+  const t = col.type_name.toLowerCase();
+  if (col.is_user_defined) return col.type_name;
+  const len = (bytes: number, perChar = 1) => (bytes === -1 ? "max" : String(bytes / perChar));
+  switch (t) {
+    case "varchar":
+    case "char":
+    case "varbinary":
+    case "binary":
+      return `${t}(${len(col.max_length)})`;
+    case "nvarchar":
+    case "nchar":
+      return `${t}(${len(col.max_length, 2)})`;
+    case "decimal":
+    case "numeric":
+      return `${t}(${col.precision},${col.scale})`;
+    case "datetime2":
+    case "datetimeoffset":
+    case "time":
+      return `${t}(${col.scale})`;
+    default:
+      return t;
+  }
 }
 
 function buildMssqlCreateTable(

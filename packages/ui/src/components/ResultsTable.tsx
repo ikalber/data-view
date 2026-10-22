@@ -78,10 +78,11 @@ export function ResultsTable({ result }: { result: QueryResult | null }) {
       <table className="dv-table">
         <thead>
           <tr>
-            {result.columns.map((c) => (
-              <th key={c.name} title={c.dataType}>
+            {/* Index keys: result sets can repeat a column name (a.id, b.id). */}
+            {result.columns.map((c, i) => (
+              <th key={i} title={c.dataType}>
                 {c.name}
-                <span style={{ color: "var(--dv-text-muted)", fontWeight: 400, marginLeft: 6 }}>
+                <span style={{ color: "var(--dv-text-mute)", fontWeight: 400, marginLeft: 6 }}>
                   {c.dataType}
                 </span>
               </th>

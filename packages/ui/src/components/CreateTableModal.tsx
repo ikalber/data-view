@@ -9,7 +9,7 @@ import type {
   DatabaseDriver,
   SchemaInfo,
 } from "@data-view/core";
-import { quoteIdent } from "@data-view/core";
+import { quoteIdent, quoteString } from "@data-view/core";
 import { useTransport } from "../transport-context";
 
 interface Props {
@@ -289,7 +289,7 @@ function parseCommaList(s: string): string[] {
     .filter((v) => v.length > 0);
 }
 
-interface DraftColumn {
+export interface DraftColumn {
   /** Stable id so the row inputs aren't re-mounted on reorder. */
   uid: string;
   name: string;
@@ -359,17 +359,20 @@ const SCHEMA_LABEL: Record<DatabaseDriver, string> = {
 /** Build the SQL data-type string for the given draft column. For non-MySQL
  * drivers the ENUM is emitted as a CHECK constraint that references the
  * column itself, so the result includes the constraint clause. */
-function resolveDataType(col: DraftColumn, driver: DatabaseDriver): string {
+export function resolveDataType(col: DraftColumn, driver: DatabaseDriver): string {
   if (col.typeChoice === CUSTOM) return col.customType.trim();
   if (col.typeChoice === ENUM) {
     const values = col.enumValues.filter((v) => v.length > 0);
     if (values.length === 0) return "";
-    const literals = values.map(quoteLit).join(", ");
+    // Driver-aware: MySQL needs backslashes escaped, SQL Server gets N'…' so
+    // non-Latin values survive the database code page.
+    const literals = values.map((v) => quoteString(v, driver)).join(", ");
     if (driver === "mysql") return `ENUM(${literals})`;
     // Postgres / SQL Server: emit a CHECK constraint referencing this column.
     // The adapter concatenates `<name> <dataType>` so the CHECK lands after
     // the type as a column-level constraint.
-    const colRef = quoteIdent(driver, col.name || "valor");
+    // Trimmed like the adapter trims the column name itself.
+    const colRef = quoteIdent(driver, col.name.trim() || "valor");
     const stringType = driver === "postgres" ? "text" : "nvarchar(255)";
     return `${stringType} CHECK (${colRef} IN (${literals}))`;
   }
@@ -390,10 +393,6 @@ function buildOptionSql(option: TypeOption, paramValues: string[]): string {
   }
   if (option.suffix) s += option.suffix;
   return s;
-}
-
-function quoteLit(s: string): string {
-  return "'" + s.replace(/'/g, "''") + "'";
 }
 
 export function CreateTableModal({
@@ -694,7 +693,7 @@ export function CreateTableModal({
             style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
           >
             <thead>
-              <tr style={{ background: "var(--dv-surface-2)", textAlign: "left" }}>
+              <tr style={{ background: "var(--dv-panel-2)", textAlign: "left" }}>
                 <th style={{ padding: "6px 8px", width: "22%" }}>Nombre</th>
                 <th style={{ padding: "6px 8px", width: "32%" }}>Tipo</th>
                 <th style={{ padding: "6px 8px", width: "18%" }}>Default</th>
@@ -907,7 +906,7 @@ export function CreateTableModal({
                       <thead>
                         <tr
                           style={{
-                            background: "var(--dv-surface-2)",
+                            background: "var(--dv-panel-2)",
                             textAlign: "left",
                           }}
                         >
@@ -1173,7 +1172,7 @@ export function CreateTableModal({
                       <thead>
                         <tr
                           style={{
-                            background: "var(--dv-surface-2)",
+                            background: "var(--dv-panel-2)",
                             textAlign: "left",
                           }}
                         >
@@ -1464,7 +1463,7 @@ function EnumEditor({ values, onChange, disabled }: EnumEditorProps) {
         padding: "4px 6px",
         border: "1px solid var(--dv-border)",
         borderRadius: 4,
-        background: "var(--dv-surface)",
+        background: "var(--dv-bg-soft)",
         minHeight: 30,
       }}
     >

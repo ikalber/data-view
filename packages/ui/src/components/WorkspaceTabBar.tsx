@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import clsx from "clsx";
@@ -15,6 +16,7 @@ import {
   type TabGroup,
   type WorkspaceTab,
 } from "./workspace-tab";
+import type { DropPlace } from "./workspace-state";
 
 interface Props {
   tabs: WorkspaceTab[];
@@ -34,6 +36,8 @@ interface Props {
   onToggleGroupCollapsed: (groupId: string) => void;
   onDissolveGroup: (groupId: string) => void;
   onCloseGroup: (groupId: string) => void;
+  /** Drag & drop reorder: move `dragId` before/after `targetId`. */
+  onMoveTab?: (dragId: string, targetId: string, place: DropPlace) => void;
 }
 
 type ContextMenu =
@@ -56,9 +60,51 @@ export function WorkspaceTabBar({
   onToggleGroupCollapsed,
   onDissolveGroup,
   onCloseGroup,
+  onMoveTab,
 }: Props) {
   const [menu, setMenu] = useState<ContextMenu | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // Drag & drop reorder state. The dragged id lives in a ref (dragover fires
+  // constantly); the drop hint is state so the indicator renders.
+  const dragIdRef = useRef<string | null>(null);
+  const [dropHint, setDropHint] = useState<
+    { tabId: string; place: DropPlace } | null
+  >(null);
+
+  function endDrag() {
+    dragIdRef.current = null;
+    setDropHint(null);
+  }
+
+  function onTabDragStart(e: ReactDragEvent<HTMLDivElement>, id: string) {
+    dragIdRef.current = id;
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox won't start a drag without data.
+    e.dataTransfer.setData("text/plain", id);
+  }
+
+  function onTabDragOver(e: ReactDragEvent<HTMLDivElement>, id: string) {
+    const dragId = dragIdRef.current;
+    if (!dragId || dragId === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = e.currentTarget.getBoundingClientRect();
+    const place: DropPlace =
+      e.clientX < rect.left + rect.width / 2 ? "before" : "after";
+    if (dropHint?.tabId !== id || dropHint.place !== place) {
+      setDropHint({ tabId: id, place });
+    }
+  }
+
+  function onTabDrop(e: ReactDragEvent<HTMLDivElement>, id: string) {
+    const dragId = dragIdRef.current;
+    if (!dragId || dragId === id) return;
+    e.preventDefault();
+    const place =
+      dropHint?.tabId === id ? dropHint.place : ("before" as DropPlace);
+    onMoveTab?.(dragId, id, place);
+    endDrag();
+  }
 
   const groupById = useMemo(() => {
     const m = new Map<string, TabGroup>();
@@ -110,6 +156,9 @@ export function WorkspaceTabBar({
     kind: "group-header";
     group: TabGroup;
     tabCount: number;
+    /** First tab of the run — makes the React key unique even if a group's
+     * tabs ever end up split in two runs. */
+    firstTabId: string;
   }
   interface TabItem {
     kind: "tab";
@@ -127,7 +176,12 @@ export function WorkspaceTabBar({
           const g = groupById.get(gid);
           if (g) {
             const tabCount = tabs.filter((x) => x.groupId === gid).length;
-            out.push({ kind: "group-header", group: g, tabCount });
+            out.push({
+              kind: "group-header",
+              group: g,
+              tabCount,
+              firstTabId: t.id,
+            });
           }
         }
         lastGroupId = gid;
@@ -201,7 +255,7 @@ export function WorkspaceTabBar({
               const g = item.group;
               return (
                 <div
-                  key={`g-${g.id}`}
+                  key={`g-${g.id}-${item.firstTabId}`}
                   className={clsx(
                     "dv-ws-group-head",
                     g.collapsed && "is-collapsed",
@@ -227,6 +281,7 @@ export function WorkspaceTabBar({
             const dirty = dirtyTabIds.has(t.id);
             const inGroup = !!t.groupId;
             const isPreview = !!t.isPreview;
+            const hint = dropHint?.tabId === t.id ? dropHint.place : null;
             return (
               <div
                 key={t.id}
@@ -239,6 +294,29 @@ export function WorkspaceTabBar({
                   inGroup && "is-grouped",
                   isPreview && "is-preview",
                 )}
+                style={
+                  hint
+                    ? {
+                        boxShadow:
+                          hint === "before"
+                            ? "inset 2px 0 0 var(--dv-accent)"
+                            : "inset -2px 0 0 var(--dv-accent)",
+                      }
+                    : undefined
+                }
+                draggable={!!onMoveTab}
+                onDragStart={(e) => onTabDragStart(e, t.id)}
+                onDragOver={(e) => onTabDragOver(e, t.id)}
+                onDragLeave={(e) => {
+                  if (
+                    dropHint?.tabId === t.id &&
+                    !e.currentTarget.contains(e.relatedTarget as Node | null)
+                  ) {
+                    setDropHint(null);
+                  }
+                }}
+                onDrop={(e) => onTabDrop(e, t.id)}
+                onDragEnd={endDrag}
                 onClick={() => onActivate(t.id)}
                 onDoubleClick={() => onPinTab(t.id)}
                 onMouseDown={(e) => onTabMouseDown(e, t.id)}

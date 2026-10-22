@@ -112,7 +112,27 @@ export function getConnectionWithSecret(
   };
 }
 
+const DRIVERS = new Set(["postgres", "mysql", "mssql"]);
+
+function validateInput(input: ConnectionInput): void {
+  if (!input || typeof input !== "object") throw new Error("Datos de conexión inválidos");
+  if (typeof input.name !== "string" || !input.name.trim()) {
+    throw new Error("El nombre de la conexión es obligatorio");
+  }
+  if (!DRIVERS.has(input.driver)) throw new Error(`Driver no soportado: ${input.driver}`);
+  if (typeof input.host !== "string" || !input.host.trim()) {
+    throw new Error("El host es obligatorio");
+  }
+  if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
+    throw new Error("El puerto tiene que ser un número entre 1 y 65535");
+  }
+  if (typeof input.database !== "string" || typeof input.username !== "string") {
+    throw new Error("Datos de conexión inválidos");
+  }
+}
+
 export function saveConnection(userId: string, input: ConnectionInput): ConnectionConfig {
+  validateInput(input);
   const db = getDb();
   const now = new Date().toISOString();
   const id = input.id ?? randomUUID();
@@ -134,8 +154,9 @@ export function saveConnection(userId: string, input: ConnectionInput): Connecti
              WHERE id=? AND user_id=?`,
           );
 
+      let res;
       if (passwordCipher) {
-        stmt.run(
+        res = stmt.run(
           input.name,
           input.driver,
           input.host,
@@ -151,7 +172,7 @@ export function saveConnection(userId: string, input: ConnectionInput): Connecti
           userId,
         );
       } else {
-        stmt.run(
+        res = stmt.run(
           input.name,
           input.driver,
           input.host,
@@ -166,6 +187,9 @@ export function saveConnection(userId: string, input: ConnectionInput): Connecti
           userId,
         );
       }
+      // Unknown id or someone else's connection: bail out before touching
+      // connection_tags (which isn't scoped by user).
+      if (res.changes === 0) throw new Error("Conexión no encontrada");
     } else {
       db.prepare(
         `INSERT INTO connections

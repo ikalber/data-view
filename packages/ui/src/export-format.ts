@@ -14,6 +14,15 @@ export const formatExport = (
 ): string => formatRows(result, opts);
 
 /**
+ * True for the error the desktop transport throws when the user dismisses
+ * the "save as" dialog (`ExportCancelled` in apps/desktop). Matched by name
+ * because the UI package can't import the desktop class.
+ */
+export function isExportCancelled(e: unknown): boolean {
+  return e instanceof Error && e.name === "ExportCancelled";
+}
+
+/**
  * Trigger a browser download for a string payload. No-op outside the
  * browser environment; the desktop transport writes to disk instead.
  */

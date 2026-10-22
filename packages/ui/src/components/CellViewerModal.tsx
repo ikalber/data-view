@@ -206,7 +206,7 @@ export function CellViewerModal({ columnName, dataType, value, onClose }: Props)
             minHeight: 200,
             maxHeight: "60vh",
             overflow: "auto",
-            background: "var(--dv-surface)",
+            background: "var(--dv-bg-soft)",
             border: "1px solid var(--dv-border)",
             borderRadius: 6,
             padding: 12,

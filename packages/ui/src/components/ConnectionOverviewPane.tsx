@@ -31,7 +31,13 @@ export function ConnectionOverviewPane({ connection, onSelectDatabase }: Props) 
     };
   }, [connection.id, transport]);
 
-  const dbLabel = connection.driver === "postgres" ? "Schema" : "Database";
+  // The overview lists server databases on every driver (pg_database,
+  // sys.databases, SHOW DATABASES).
+  const dbLabel = "Database";
+  // Only on MySQL is a database the same thing as the sidebar's "schema",
+  // so only there can a row be opened. Postgres / SQL Server connections are
+  // bound to one database: opening another one as a schema showed nothing.
+  const canOpen = connection.driver === "mysql" && !!onSelectDatabase;
   const databases = data?.databases ?? [];
   const userDatabases = databases.filter((d) => !d.isSystem);
   const maxSize = databases.reduce((m, d) => Math.max(m, d.sizeBytes ?? 0), 0);
@@ -105,7 +111,11 @@ export function ConnectionOverviewPane({ connection, onSelectDatabase }: Props) 
                 ? "Cargando…"
                 : `${databases.length} ${dbLabel.toLowerCase()}${
                     databases.length === 1 ? "" : "s"
-                  } visibles · clic para abrir`}
+                  } visibles${
+                    canOpen
+                      ? " · clic para abrir"
+                      : " · para explorar otra base, creá una conexión que apunte a ella"
+                  }`}
             </div>
           </div>
         </div>
@@ -130,8 +140,8 @@ export function ConnectionOverviewPane({ connection, onSelectDatabase }: Props) 
                 return (
                   <div
                     key={d.name}
-                    className={`dv-rel-table-row${onSelectDatabase ? "" : " is-static"}`}
-                    onClick={() => onSelectDatabase?.(d.name)}
+                    className={`dv-rel-table-row${canOpen ? "" : " is-static"}`}
+                    onClick={canOpen ? () => onSelectDatabase?.(d.name) : undefined}
                   >
                     <div className="dv-rel-name">
                       <span className="dv-table-row-icon">⛁</span>

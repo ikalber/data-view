@@ -8,7 +8,6 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 import type {
   ColumnInfo,
@@ -25,12 +24,15 @@ interface Props {
   onOpenTable: (schema: string, name: string) => void;
 }
 
-interface NodeData {
+export interface NodeData {
   schema: string;
   name: string;
   columns: ColumnInfo[];
   foreignKeys: ForeignKeyInfo[];
   inboundCount: number;
+  /** Placeholder for a table in another schema that an FK points to. Only
+   * the referenced columns are known; it's drawn dimmed with its schema. */
+  external?: boolean;
 }
 
 interface NodePosition {
@@ -50,19 +52,31 @@ interface EdgeData {
 const NODE_WIDTH = 240;
 const HEADER_HEIGHT = 38;
 const ROW_HEIGHT = 22;
+/** .dv-erd-node-body vertical padding (top). */
+const BODY_PADDING = 4;
+/** Height of the "+N columnas" / "sin columnas" footer row. */
+const EXTRA_ROW_HEIGHT = 28;
+const MAX_VISIBLE_COLUMNS = 18;
 const COLUMN_GAP = 90;
 const ROW_GAP = 36;
-const MIN_ZOOM = 0.3;
+/** Layout wraps a layer into extra columns past this height (see autoLayout). */
+const MIN_WRAP_HEIGHT = 900;
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2;
 const FETCH_CONCURRENCY = 8;
 
-function nodeKey(schema: string, name: string): string {
-  return `${schema}.${name}`;
+export function nodeKey(schema: string, name: string): string {
+  // \u0001 can't appear in identifiers, so "a.b"+"c" ≠ "a"+"b.c".
+  return `${schema}\u0001${name}`;
 }
 
 function nodeHeight(node: NodeData): number {
-  const visible = Math.min(node.columns.length, 18);
-  return HEADER_HEIGHT + visible * ROW_HEIGHT + 8;
+  const visible = Math.min(node.columns.length, MAX_VISIBLE_COLUMNS);
+  const footer =
+    node.columns.length === 0 || node.columns.length > MAX_VISIBLE_COLUMNS
+      ? EXTRA_ROW_HEIGHT
+      : 0;
+  return HEADER_HEIGHT + BODY_PADDING * 2 + visible * ROW_HEIGHT + footer;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -91,10 +105,7 @@ async function mapWithConcurrency<T, R>(
 /** Assign a column index per node by longest-FK-chain depth. Tables that
  * reference others sit to the right of what they reference, so arrows
  * flow left → right whenever possible. Cycles fall back to depth 0. */
-function computeLayers(
-  nodes: NodeData[],
-  schema: string,
-): Map<string, number> {
+function computeLayers(nodes: NodeData[]): Map<string, number> {
   const byKey = new Map<string, NodeData>();
   for (const n of nodes) byKey.set(nodeKey(n.schema, n.name), n);
 
@@ -109,10 +120,10 @@ function computeLayers(
     let d = 0;
     if (node) {
       for (const fk of node.foreignKeys) {
-        // Only follow FKs that point inside this schema and to a known node.
-        if (fk.referencedSchema && fk.referencedSchema !== schema) continue;
+        // Only follow FKs that point to a known node (cross-schema targets
+        // are present as external placeholder nodes).
         const refKey = nodeKey(
-          fk.referencedSchema || schema,
+          fk.referencedSchema || node.schema,
           fk.referencedTable,
         );
         if (!byKey.has(refKey) || refKey === key) continue;
@@ -128,11 +139,8 @@ function computeLayers(
   return memo;
 }
 
-function autoLayout(
-  nodes: NodeData[],
-  schema: string,
-): Map<string, NodePosition> {
-  const layers = computeLayers(nodes, schema);
+export function autoLayout(nodes: NodeData[]): Map<string, NodePosition> {
+  const layers = computeLayers(nodes);
   const byLayer = new Map<number, NodeData[]>();
   for (const n of nodes) {
     const l = layers.get(nodeKey(n.schema, n.name)) ?? 0;
@@ -147,6 +155,26 @@ function autoLayout(
     );
   }
 
+  // Without wrapping, a schema with hundreds of unrelated tables (all in
+  // layer 0) becomes one endless column. Pick a column height that gives the
+  // whole diagram a roughly 16:10 shape and wrap layers that exceed it.
+  let totalHeight = 0;
+  let tallest = 0;
+  for (const n of nodes) {
+    const h = nodeHeight(n) + ROW_GAP;
+    totalHeight += h;
+    tallest = Math.max(tallest, h);
+  }
+  const columns = Math.max(
+    1,
+    Math.round(Math.sqrt((totalHeight * 1.6) / (NODE_WIDTH + COLUMN_GAP))),
+  );
+  const maxColumnHeight = Math.max(
+    MIN_WRAP_HEIGHT,
+    tallest,
+    totalHeight / columns,
+  );
+
   const pos = new Map<string, NodePosition>();
   const layerIdx = [...byLayer.keys()].sort((a, b) => a - b);
   let x = 0;
@@ -154,8 +182,13 @@ function autoLayout(
     const list = byLayer.get(l)!;
     let y = 0;
     for (const n of list) {
+      const h = nodeHeight(n) + ROW_GAP;
+      if (y > 0 && y + h > maxColumnHeight) {
+        x += NODE_WIDTH + COLUMN_GAP;
+        y = 0;
+      }
       pos.set(nodeKey(n.schema, n.name), { x, y });
-      y += nodeHeight(n) + ROW_GAP;
+      y += h;
     }
     x += NODE_WIDTH + COLUMN_GAP;
   }
@@ -169,8 +202,15 @@ interface PortMeta {
 
 function buildPorts(node: NodeData): PortMeta {
   const yByColumn = new Map<string, number>();
+  const top = HEADER_HEIGHT + BODY_PADDING;
   node.columns.forEach((col, i) => {
-    yByColumn.set(col.name, HEADER_HEIGHT + i * ROW_HEIGHT + ROW_HEIGHT / 2);
+    // Columns past the visible ones are collapsed into the "+N columnas"
+    // footer — anchor their edges there instead of below the node.
+    const y =
+      i < MAX_VISIBLE_COLUMNS
+        ? top + i * ROW_HEIGHT + ROW_HEIGHT / 2
+        : top + MAX_VISIBLE_COLUMNS * ROW_HEIGHT + EXTRA_ROW_HEIGHT / 2;
+    yByColumn.set(col.name, y);
   });
   return { yByColumn };
 }
@@ -275,8 +315,43 @@ export function SchemaDiagramPane({
           inboundCount: inbound.get(nodeKey(d.schema, d.name)) ?? 0,
         }));
 
-        setNodes(built);
-        setPositions(autoLayout(built, activeSchema));
+        // FKs into other schemas: add a placeholder node per referenced table
+        // (with just the referenced columns) so the relation is still drawn.
+        const known = new Set(built.map((n) => nodeKey(n.schema, n.name)));
+        const externals = new Map<string, NodeData>();
+        for (const d of details) {
+          for (const fk of d.foreignKeys) {
+            const refSchema = fk.referencedSchema || d.schema;
+            const key = nodeKey(refSchema, fk.referencedTable);
+            if (known.has(key)) continue;
+            let ext = externals.get(key);
+            if (!ext) {
+              ext = {
+                schema: refSchema,
+                name: fk.referencedTable,
+                columns: [],
+                foreignKeys: [],
+                inboundCount: inbound.get(key) ?? 0,
+                external: true,
+              };
+              externals.set(key, ext);
+            }
+            for (const col of fk.referencedColumns) {
+              if (ext.columns.some((c) => c.name === col)) continue;
+              ext.columns.push({
+                name: col,
+                dataType: "",
+                nullable: true,
+                isPrimaryKey: false,
+                isUnique: false,
+              });
+            }
+          }
+        }
+        const all = [...built, ...externals.values()];
+
+        setNodes(all);
+        setPositions(autoLayout(all));
       } catch (e) {
         if (!cancel)
           setError(e instanceof Error ? e.message : String(e));
@@ -389,24 +464,33 @@ export function SchemaDiagramPane({
     }
   }, []);
 
-  const onWheel = useCallback(
-    (e: ReactWheelEvent) => {
+  // Ctrl/⌘ + wheel zooms the diagram. React registers wheel listeners as
+  // passive, so `preventDefault()` there is ignored and the browser zooms the
+  // whole page too — attach a native non-passive listener instead.
+  const viewRef = useRef({ pan, zoom });
+  viewRef.current = { pan, zoom };
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
-      const rect = viewportRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      const rect = el.getBoundingClientRect();
+      const { pan: p, zoom: z } = viewRef.current;
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
       const factor = Math.exp(-e.deltaY * 0.0015);
-      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * factor));
+      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z * factor));
       // Zoom around the cursor: keep the world point under the cursor fixed.
-      const worldX = (px - pan.x) / zoom;
-      const worldY = (py - pan.y) / zoom;
+      const worldX = (px - p.x) / z;
+      const worldY = (py - p.y) / z;
       setZoom(next);
       setPan({ x: px - worldX * next, y: py - worldY * next });
-    },
-    [pan, zoom],
-  );
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+    // The viewport only exists while a schema is selected.
+  }, [activeSchema]);
 
   function fitToView() {
     if (positions.size === 0) {
@@ -442,7 +526,7 @@ export function SchemaDiagramPane({
 
   function relayout() {
     if (!activeSchema) return;
-    setPositions(autoLayout(nodes, activeSchema));
+    setPositions(autoLayout(nodes));
     setHighlight(null);
   }
 
@@ -494,9 +578,7 @@ export function SchemaDiagramPane({
     );
   }
 
-  const tableCount = nodes.filter((n) =>
-    relations.find((r) => r.schema === n.schema && r.name === n.name && r.kind === "table"),
-  ).length;
+  const tableCount = relations.filter((r) => r.kind === "table").length;
   const fkCount = edges.length;
 
   const transformStyle: CSSProperties = {
@@ -587,7 +669,6 @@ export function SchemaDiagramPane({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        onWheel={onWheel}
       >
         {!loading && nodes.length === 0 && !error && (
           <div className="dv-empty">Sin tablas en {activeSchema}.</div>
@@ -683,6 +764,9 @@ export function SchemaDiagramPane({
                   left: pos.x,
                   top: pos.y,
                   width: NODE_WIDTH,
+                  ...(n.external
+                    ? { borderStyle: "dashed", opacity: dim ? undefined : 0.75 }
+                    : null),
                 }}
                 onPointerDown={(e) => onNodePointerDown(e, key)}
                 onClick={() => setHighlight((h) => (h === key ? null : key))}
@@ -691,7 +775,9 @@ export function SchemaDiagramPane({
               >
                 <div className="dv-erd-node-header">
                   <span className="dv-erd-node-icon">▦</span>
-                  <span className="dv-erd-node-name">{n.name}</span>
+                  <span className="dv-erd-node-name">
+                    {n.external ? `${n.schema}.${n.name}` : n.name}
+                  </span>
                   <button
                     type="button"
                     className="dv-erd-node-open"
@@ -709,7 +795,7 @@ export function SchemaDiagramPane({
                   {n.columns.length === 0 && (
                     <div className="dv-erd-node-empty">sin columnas</div>
                   )}
-                  {n.columns.slice(0, 18).map((col) => {
+                  {n.columns.slice(0, MAX_VISIBLE_COLUMNS).map((col) => {
                     const isPk = col.isPrimaryKey;
                     const isFk = fkColumns.has(col.name);
                     return (
@@ -735,9 +821,9 @@ export function SchemaDiagramPane({
                       </div>
                     );
                   })}
-                  {n.columns.length > 18 && (
+                  {n.columns.length > MAX_VISIBLE_COLUMNS && (
                     <div className="dv-erd-node-more">
-                      + {n.columns.length - 18} columnas
+                      + {n.columns.length - MAX_VISIBLE_COLUMNS} columnas
                     </div>
                   )}
                 </div>

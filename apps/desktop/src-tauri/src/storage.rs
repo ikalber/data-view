@@ -37,7 +37,7 @@ impl StoredConnection {
         ConnectionConfig {
             id: self.id.clone(),
             name: self.name.clone(),
-            driver: self.driver.clone(),
+            driver: self.driver,
             host: self.host.clone(),
             port: self.port,
             database: self.database.clone(),
@@ -59,7 +59,7 @@ impl StoredConnection {
         };
         Ok(ResolvedConnection {
             id: self.id.clone(),
-            driver: self.driver.clone(),
+            driver: self.driver,
             host: self.host.clone(),
             port: self.port,
             database: self.database.clone(),
@@ -86,19 +86,38 @@ pub struct ConnectionStore {
     inner: Mutex<StoreFile>,
 }
 
-const SEED_TAGS: &[(&str, TagColor)] = &[
-    ("Test", TagColor::Info),
-    ("Producción", TagColor::Danger),
-];
+const SEED_TAGS: &[(&str, TagColor)] =
+    &[("Test", TagColor::Info), ("Producción", TagColor::Danger)];
 
 impl ConnectionStore {
     pub fn open() -> AppResult<Self> {
         let dir = app_data_dir()?;
         fs::create_dir_all(&dir)?;
-        let path = dir.join("connections.json");
+        Self::open_at(dir.join("connections.json"))
+    }
+
+    /// Open (or create) the store backed by `path`.
+    pub fn open_at(path: PathBuf) -> AppResult<Self> {
         let mut inner: StoreFile = if path.exists() {
             let data = fs::read_to_string(&path)?;
-            serde_json::from_str(&data).unwrap_or_default()
+            match serde_json::from_str(&data) {
+                Ok(file) => file,
+                Err(e) => {
+                    // Never silently replace an unreadable store with an empty
+                    // one (that wiped every saved connection): keep a copy
+                    // next to it so nothing is lost, then start fresh.
+                    let backup = path.with_extension(format!(
+                        "json.corrupt-{}",
+                        chrono::Utc::now().format("%Y%m%d%H%M%S")
+                    ));
+                    fs::copy(&path, &backup)?;
+                    eprintln!(
+                        "data-view: connections store unreadable ({e}); backup at {}",
+                        backup.display()
+                    );
+                    StoreFile::default()
+                }
+            }
         } else {
             StoreFile::default()
         };
@@ -140,7 +159,11 @@ impl ConnectionStore {
 
     pub fn resolve(&self, id: &str) -> AppResult<ResolvedConnection> {
         let inner = self.inner.lock();
-        let row = inner.connections.iter().find(|c| c.id == id).ok_or(AppError::NotFound)?;
+        let row = inner
+            .connections
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or(AppError::NotFound)?;
         row.resolve()
     }
 
@@ -214,29 +237,33 @@ impl ConnectionStore {
         Ok(())
     }
 
-    pub fn resolve_or_input(
-        &self,
-        input: &ConnectionInput,
-    ) -> AppResult<ResolvedConnection> {
-        // If input carries a password, use it directly. Otherwise look up the
-        // saved connection so the UI doesn't need to round-trip secrets.
-        if let Some(pwd) = &input.password {
-            if !pwd.is_empty() {
-                return Ok(ResolvedConnection {
-                    id: input.id.clone().unwrap_or_else(|| "draft".into()),
-                    driver: input.driver.clone(),
-                    host: input.host.clone(),
-                    port: input.port,
-                    database: input.database.clone(),
-                    username: input.username.clone(),
-                    password: pwd.clone(),
-                    ssl: input.ssl,
-                    options: input.options.clone(),
-                });
-            }
-        }
-        let id = input.id.as_deref().ok_or_else(|| AppError::msg("password is required for new connections"))?;
-        self.resolve(id)
+    pub fn resolve_or_input(&self, input: &ConnectionInput) -> AppResult<ResolvedConnection> {
+        // Always test what the form currently says (host, port, db, user,
+        // ssl, options). Only the password may come from the saved record:
+        // the UI never receives it back, so an edited connection arrives with
+        // an empty one. A new connection without password is legit (trust /
+        // passwordless auth).
+        let typed = input.password.as_deref().filter(|p| !p.is_empty());
+        let password = match (typed, input.id.as_deref()) {
+            (Some(p), _) => p.to_string(),
+            (None, Some(id)) => match self.resolve(id) {
+                Ok(saved) => saved.password,
+                Err(AppError::NotFound) => String::new(),
+                Err(e) => return Err(e),
+            },
+            (None, None) => String::new(),
+        };
+        Ok(ResolvedConnection {
+            id: input.id.clone().unwrap_or_else(|| "draft".into()),
+            driver: input.driver,
+            host: input.host.clone(),
+            port: input.port,
+            database: input.database.clone(),
+            username: input.username.clone(),
+            password,
+            ssl: input.ssl,
+            options: input.options.clone(),
+        })
     }
 
     // ── Folders ───────────────────────────────────────────────────────────
@@ -303,8 +330,16 @@ impl ConnectionStore {
         seed_tags_if_needed(&mut inner);
         let mut out = inner.tags.clone();
         out.sort_by(|a, b| {
-            let ak = if matches!(a.kind, TagKind::System) { 0 } else { 1 };
-            let bk = if matches!(b.kind, TagKind::System) { 0 } else { 1 };
+            let ak = if matches!(a.kind, TagKind::System) {
+                0
+            } else {
+                1
+            };
+            let bk = if matches!(b.kind, TagKind::System) {
+                0
+            } else {
+                1
+            };
             ak.cmp(&bk)
                 .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
@@ -429,5 +464,237 @@ fn dirs_next() -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DriverKind;
+
+    /// Fresh store in a unique temp dir (removed on drop).
+    struct TempStore {
+        dir: PathBuf,
+        store: ConnectionStore,
+    }
+
+    impl TempStore {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("dvt_rs_store_{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            let store = ConnectionStore::open_at(dir.join("connections.json")).unwrap();
+            Self { dir, store }
+        }
+        fn reopen(&self) -> ConnectionStore {
+            ConnectionStore::open_at(self.dir.join("connections.json")).unwrap()
+        }
+    }
+
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn input(id: Option<String>, password: Option<&str>) -> ConnectionInput {
+        ConnectionInput {
+            id,
+            name: "Local".into(),
+            driver: DriverKind::Postgres,
+            host: "localhost".into(),
+            port: 5432,
+            database: "postgres".into(),
+            username: "postgres".into(),
+            password: password.map(String::from),
+            ssl: false,
+            options: HashMap::new(),
+            folder_id: None,
+            tag_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn password_is_encrypted_and_kept_on_empty_update() {
+        let t = TempStore::new();
+        let saved = t.store.upsert(input(None, Some("s3cret"))).unwrap();
+        let raw = fs::read_to_string(t.dir.join("connections.json")).unwrap();
+        assert!(!raw.contains("s3cret"), "password stored in plaintext");
+        assert_eq!(t.store.resolve(&saved.id).unwrap().password, "s3cret");
+
+        // Update without password keeps the stored one.
+        let mut upd = input(Some(saved.id.clone()), Some(""));
+        upd.host = "db.example".into();
+        t.store.upsert(upd).unwrap();
+        let r = t.store.resolve(&saved.id).unwrap();
+        assert_eq!(r.password, "s3cret");
+        assert_eq!(r.host, "db.example");
+
+        // A new password replaces it.
+        t.store
+            .upsert(input(Some(saved.id.clone()), Some("other")))
+            .unwrap();
+        assert_eq!(t.store.resolve(&saved.id).unwrap().password, "other");
+
+        // Survives a reload from disk.
+        assert_eq!(t.reopen().resolve(&saved.id).unwrap().password, "other");
+    }
+
+    #[test]
+    fn update_of_unknown_connection_is_not_found() {
+        let t = TempStore::new();
+        assert!(matches!(
+            t.store.upsert(input(Some("nope".into()), None)),
+            Err(AppError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_connection_uses_form_fields_with_saved_password() {
+        let t = TempStore::new();
+        let saved = t.store.upsert(input(None, Some("s3cret"))).unwrap();
+        let mut edited = input(Some(saved.id.clone()), None);
+        edited.host = "edited-host".into();
+        edited.port = 6543;
+        edited.database = "otherdb".into();
+        edited.ssl = true;
+        let r = t.store.resolve_or_input(&edited).unwrap();
+        assert_eq!(r.host, "edited-host");
+        assert_eq!(r.port, 6543);
+        assert_eq!(r.database, "otherdb");
+        assert!(r.ssl);
+        assert_eq!(r.password, "s3cret");
+
+        // Typed password wins.
+        let mut typed = edited;
+        typed.password = Some("typed".into());
+        assert_eq!(t.store.resolve_or_input(&typed).unwrap().password, "typed");
+
+        // New connection without password (trust auth) is allowed.
+        let r = t.store.resolve_or_input(&input(None, None)).unwrap();
+        assert_eq!(r.password, "");
+    }
+
+    #[test]
+    fn system_tags_are_seeded_once_and_protected() {
+        let t = TempStore::new();
+        let tags = t.store.list_tags();
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Producción", "Test"]);
+        assert!(tags.iter().all(|t| matches!(t.kind, TagKind::System)));
+        // Reopening doesn't duplicate them.
+        assert_eq!(t.reopen().list_tags().len(), 2);
+        let err = t.store.delete_tag(&tags[0].id).unwrap_err();
+        assert!(err.to_string().contains("sistema"));
+        // ...but they can be renamed.
+        let renamed = t
+            .store
+            .upsert_tag(TagInput {
+                id: Some(tags[0].id.clone()),
+                name: "Prod".into(),
+                color: TagColor::Danger,
+            })
+            .unwrap();
+        assert!(matches!(renamed.kind, TagKind::System));
+    }
+
+    #[test]
+    fn deleting_a_tag_removes_it_from_connections() {
+        let t = TempStore::new();
+        let tag = t
+            .store
+            .upsert_tag(TagInput {
+                id: None,
+                name: "Mine".into(),
+                color: TagColor::Info,
+            })
+            .unwrap();
+        let mut inp = input(None, None);
+        inp.tag_ids = vec![tag.id.clone(), tag.id.clone(), "unknown".into()];
+        let conn = t.store.upsert(inp).unwrap();
+        assert_eq!(conn.tag_ids, vec![tag.id.clone()]);
+        t.store.delete_tag(&tag.id).unwrap();
+        assert!(t.store.get(&conn.id).unwrap().tag_ids.is_empty());
+        assert!(t.reopen().get(&conn.id).unwrap().tag_ids.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_folder_unparents_its_connections() {
+        let t = TempStore::new();
+        let folder = t
+            .store
+            .upsert_folder(FolderInput {
+                id: None,
+                name: " Clientes ".into(),
+                color: TagColor::Accent,
+            })
+            .unwrap();
+        assert_eq!(folder.name, "Clientes");
+        let mut inp = input(None, None);
+        inp.folder_id = Some(folder.id.clone());
+        let conn = t.store.upsert(inp).unwrap();
+        assert_eq!(conn.folder_id.as_deref(), Some(folder.id.as_str()));
+        t.store.delete_folder(&folder.id).unwrap();
+        assert_eq!(t.store.get(&conn.id).unwrap().folder_id, None);
+        assert!(t.store.list_folders().is_empty());
+        // Unknown folder ids are dropped on save.
+        let mut inp = input(None, None);
+        inp.folder_id = Some("ghost".into());
+        assert_eq!(t.store.upsert(inp).unwrap().folder_id, None);
+    }
+
+    #[test]
+    fn empty_names_are_rejected() {
+        let t = TempStore::new();
+        assert!(t
+            .store
+            .upsert_folder(FolderInput {
+                id: None,
+                name: "  ".into(),
+                color: TagColor::Neutral,
+            })
+            .is_err());
+        assert!(t
+            .store
+            .upsert_tag(TagInput {
+                id: None,
+                name: "".into(),
+                color: TagColor::Neutral,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn corrupt_store_is_backed_up_not_wiped() {
+        let t = TempStore::new();
+        let path = t.dir.join("connections.json");
+        fs::write(&path, "{ not json").unwrap();
+        let store = ConnectionStore::open_at(path).unwrap();
+        assert!(store.list().is_empty());
+        let backups: Vec<_> = fs::read_dir(&t.dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(backups[0].path()).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn wire_shape_is_camel_case() {
+        let t = TempStore::new();
+        let conn = t.store.upsert(input(None, Some("x"))).unwrap();
+        let v = serde_json::to_value(&conn).unwrap();
+        for key in ["folderId", "tagIds", "createdAt", "updatedAt", "driver"] {
+            assert!(v.get(key).is_some(), "missing {key}");
+        }
+        assert!(v.get("password").is_none());
+        assert_eq!(v["driver"], "postgres");
+        let input: ConnectionInput = serde_json::from_value(serde_json::json!({
+            "name": "n", "driver": "mssql", "host": "h", "port": 1433,
+            "database": "d", "username": "u", "folderId": null
+        }))
+        .unwrap();
+        assert_eq!(input.driver, DriverKind::Mssql);
+        assert!(input.tag_ids.is_empty());
     }
 }

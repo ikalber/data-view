@@ -24,6 +24,24 @@ import type {
   Transport,
 } from "@data-view/core";
 
+/** Session expired or missing: send the user back to the login page instead
+ * of surfacing a confusing error in every pane. */
+function handleUnauthorized(res: Response): void {
+  if (res.status === 401 && typeof window !== "undefined") {
+    window.location.href = "/login";
+    throw new Error("La sesión expiró — volvé a ingresar");
+  }
+}
+
+function parseJson(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 async function http<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, {
     ...init,
@@ -32,11 +50,17 @@ async function http<T>(input: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
+  handleUnauthorized(res);
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseJson(text);
   if (!res.ok) {
-    const err = (body && typeof body === "object" && "error" in body && body.error) || res.statusText;
+    const err =
+      (body && typeof body === "object" && "error" in body && body.error) ||
+      `${res.status} ${res.statusText}`.trim();
     throw new Error(String(err));
+  }
+  if (body === undefined) {
+    throw new Error(`Respuesta inválida del servidor (${res.status})`);
   }
   return body as T;
 }
@@ -104,8 +128,8 @@ export const webTransport: Transport = {
       options.format,
       name,
     );
+    // Row count is unknown here: the server streams the file.
     const out: ExportTableResult = {
-      rowCount: 0,
       bytes: meta.bytes,
       durationMs: meta.durationMs,
       format: options.format,
@@ -172,8 +196,6 @@ export const webTransport: Transport = {
     const out: ExportDatabaseResult = {
       bytes: meta.bytes,
       durationMs: meta.durationMs,
-      tableCount: 0,
-      rowCount: 0,
       fileName: meta.fileName,
     };
     return out;
@@ -192,6 +214,7 @@ async function downloadExport(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  handleUnauthorized(res);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let err = res.statusText;

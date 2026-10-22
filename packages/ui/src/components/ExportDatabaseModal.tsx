@@ -10,6 +10,7 @@ import type {
 } from "@data-view/core";
 import { useTransport } from "../transport-context";
 import { formatBytes } from "../format";
+import { isExportCancelled } from "../export-format";
 
 interface Props {
   connection: ConnectionConfig;
@@ -34,7 +35,8 @@ export function ExportDatabaseModal({
   const [includeSchema, setIncludeSchema] = useState(true);
   const [includeData, setIncludeData] = useState(true);
   const [dropIfExists, setDropIfExists] = useState(false);
-  const [batchSize, setBatchSize] = useState(100);
+  // Kept as text so the field can be cleared while typing a new number.
+  const [batchSizeText, setBatchSizeText] = useState("100");
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState<ExportDatabaseResult | null>(null);
@@ -108,18 +110,27 @@ export function ExportDatabaseModal({
     setPhase("running");
     setErrorMessage(null);
     setResult(null);
+    const parsedBatch = Math.floor(Number(batchSizeText));
     const opts: ExportDatabaseOptions = {
       schemas: Array.from(selected),
       includeSchema,
       includeData,
-      dropIfExists,
-      batchSize: Math.max(1, Math.min(1000, batchSize)),
+      // DROP only makes sense together with the CREATE statements.
+      dropIfExists: includeSchema && dropIfExists,
+      batchSize: Number.isFinite(parsedBatch)
+        ? Math.max(1, Math.min(1000, parsedBatch))
+        : 100,
     };
     try {
       const r = await transport.exportDatabase(connection.id, opts);
       setResult(r);
       setPhase("done");
     } catch (e) {
+      // Closing the desktop save dialog cancels the export: back to idle.
+      if (isExportCancelled(e)) {
+        setPhase("idle");
+        return;
+      }
       setErrorMessage(e instanceof Error ? e.message : String(e));
       setPhase("error");
     }
@@ -275,8 +286,8 @@ export function ExportDatabaseModal({
                   min={1}
                   max={1000}
                   className="dv-input dv-export-batch-input"
-                  value={batchSize}
-                  onChange={(e) => setBatchSize(Number(e.target.value) || 100)}
+                  value={batchSizeText}
+                  onChange={(e) => setBatchSizeText(e.target.value)}
                   disabled={!includeData || phase === "running"}
                 />
                 <span style={{ color: "var(--dv-text-dim)", fontSize: 12 }}>
@@ -318,19 +329,28 @@ export function ExportDatabaseModal({
                     gap: "4px 16px",
                   }}
                 >
-                  <span>Tablas:</span>
-                  <span>{result.tableCount}</span>
-                  <span>Filas:</span>
-                  <span>{result.rowCount.toLocaleString()}</span>
+                  {/* Counts are unknown on the web (the dump is streamed). */}
+                  {result.tableCount != null && (
+                    <>
+                      <span>Tablas:</span>
+                      <span>{result.tableCount.toLocaleString()}</span>
+                    </>
+                  )}
+                  {result.rowCount != null && (
+                    <>
+                      <span>Filas:</span>
+                      <span>{result.rowCount.toLocaleString()}</span>
+                    </>
+                  )}
                   <span>Tamaño:</span>
                   <span>{formatBytes(result.bytes)}</span>
                   <span>Duración:</span>
                   <span>{(result.durationMs / 1000).toFixed(1)}s</span>
-                  {result.filePath && (
+                  {(result.filePath ?? result.fileName) && (
                     <>
                       <span>Archivo:</span>
                       <span style={{ fontFamily: "var(--dv-mono)" }}>
-                        {result.filePath}
+                        {result.filePath ?? result.fileName}
                       </span>
                     </>
                   )}

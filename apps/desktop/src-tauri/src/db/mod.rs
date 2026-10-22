@@ -1,6 +1,8 @@
-pub mod postgres;
-pub mod mysql;
+pub mod common;
 pub mod mssql;
+pub mod mysql;
+mod pg_tls;
+pub mod postgres;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{
@@ -9,6 +11,7 @@ use crate::model::{
     PageOptions, QueryResult, RelationInfo, ResolvedConnection, SchemaInfo, TableDetails,
     TestConnectionResult,
 };
+use common::RowSink;
 
 pub async fn test(conn: &ResolvedConnection) -> AppResult<TestConnectionResult> {
     match conn.driver {
@@ -57,12 +60,67 @@ pub async fn describe_table(
     }
 }
 
-pub async fn run_query(conn: &ResolvedConnection, sql: &str) -> AppResult<QueryResult> {
-    match conn.driver {
-        DriverKind::Postgres => postgres::run_query(conn, sql).await,
-        DriverKind::Mysql => mysql::run_query(conn, sql).await,
-        DriverKind::Mssql => mssql::run_query(conn, sql).await,
+/// Run an arbitrary script. `schema` overrides the default schema/database
+/// for this run: `search_path` on Postgres and `USE` on MySQL. On SQL Server
+/// the app's "schemas" live inside the connection's database and there's no
+/// per-session default schema, so it's ignored there.
+pub async fn run_query(
+    conn: &ResolvedConnection,
+    sql: &str,
+    schema: Option<&str>,
+) -> AppResult<QueryResult> {
+    let schema = schema.filter(|s| !s.trim().is_empty());
+    guard(async {
+        match conn.driver {
+            DriverKind::Postgres => postgres::run_query(conn, sql, schema).await,
+            DriverKind::Mysql => mysql::run_query(conn, sql, schema).await,
+            DriverKind::Mssql => mssql::run_query(conn, sql).await,
+        }
+    })
+    .await
+}
+
+/// Turn a panic inside a driver (e.g. tiberius hits `todo!()` when a result
+/// contains a `sql_variant` column) into an error, instead of leaving the
+/// frontend's promise hanging forever.
+async fn guard<T>(fut: impl std::future::Future<Output = AppResult<T>>) -> AppResult<T> {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("error interno");
+            Err(AppError::msg(format!(
+                "El driver no pudo procesar el resultado ({detail}). \
+                 Si la consulta devuelve tipos poco comunes (p. ej. sql_variant), \
+                 convertilos con CAST(... AS nvarchar(max))."
+            )))
+        }
     }
+}
+
+/// Stream every row of `schema.name` (optionally filtered) into `sink` using a
+/// single query on a single connection.
+pub async fn stream_table(
+    conn: &ResolvedConnection,
+    schema: &str,
+    name: &str,
+    where_clause: Option<&str>,
+    sink: &mut dyn RowSink,
+) -> AppResult<()> {
+    guard(async {
+        match conn.driver {
+            DriverKind::Postgres => {
+                postgres::stream_table(conn, schema, name, where_clause, sink).await
+            }
+            DriverKind::Mysql => mysql::stream_table(conn, schema, name, where_clause, sink).await,
+            DriverKind::Mssql => mssql::stream_table(conn, schema, name, where_clause, sink).await,
+        }
+    })
+    .await
 }
 
 pub async fn fetch_table_data(
@@ -71,11 +129,14 @@ pub async fn fetch_table_data(
     name: &str,
     options: &PageOptions,
 ) -> AppResult<QueryResult> {
-    match conn.driver {
-        DriverKind::Postgres => postgres::fetch_table_data(conn, schema, name, options).await,
-        DriverKind::Mysql => mysql::fetch_table_data(conn, schema, name, options).await,
-        DriverKind::Mssql => mssql::fetch_table_data(conn, schema, name, options).await,
-    }
+    guard(async {
+        match conn.driver {
+            DriverKind::Postgres => postgres::fetch_table_data(conn, schema, name, options).await,
+            DriverKind::Mysql => mysql::fetch_table_data(conn, schema, name, options).await,
+            DriverKind::Mssql => mssql::fetch_table_data(conn, schema, name, options).await,
+        }
+    })
+    .await
 }
 
 pub async fn create_schema(
@@ -106,7 +167,7 @@ pub async fn create_schema(
         }
         DriverKind::Mssql => format!("CREATE SCHEMA {}", ms_ident(name)),
     };
-    run_query(conn, &sql).await.map(|_| ())
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
 pub async fn create_table(
@@ -123,13 +184,13 @@ pub async fn create_table(
         return Err(AppError::msg("Agregá al menos una columna"));
     }
     let sql = build_create_table_sql(
-        conn.driver.clone(),
+        conn.driver,
         &options.schema,
         &options.name,
         &options.columns,
         &options.foreign_keys,
     )?;
-    run_query(conn, &sql).await.map(|_| ())?;
+    run_query(conn, &sql, None).await.map(|_| ())?;
     for idx in options.indexes.iter() {
         create_index_inner(
             conn,
@@ -178,8 +239,10 @@ async fn create_index_inner(
         DriverKind::Mysql => my_ident,
         DriverKind::Mssql => ms_ident,
     };
-    let auto = format!("idx_{}_{}", table, columns.join("_"));
-    let idx_name = idfn(name.unwrap_or(&auto));
+    let idx_name = match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => idfn(n),
+        None => idfn(&auto_index_name(table, columns)),
+    };
     let fq_table = format!("{}.{}", idfn(schema), idfn(table));
     let cols = columns
         .iter()
@@ -196,13 +259,10 @@ async fn create_index_inner(
         "CREATE {}INDEX {}{} ON {} ({})",
         unique_kw, if_not_exists, idx_name, fq_table, cols
     );
-    run_query(conn, &sql).await.map(|_| ())
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
-pub async fn drop_index(
-    conn: &ResolvedConnection,
-    options: &DropIndexOptions,
-) -> AppResult<()> {
+pub async fn drop_index(conn: &ResolvedConnection, options: &DropIndexOptions) -> AppResult<()> {
     let idfn: fn(&str) -> String = match conn.driver {
         DriverKind::Postgres => pg_ident,
         DriverKind::Mysql => my_ident,
@@ -214,9 +274,10 @@ pub async fn drop_index(
             format!("DROP INDEX IF EXISTS {}", fqn)
         }
         DriverKind::Mysql => {
-            let table = options.table.as_deref().ok_or_else(|| {
-                AppError::msg("MySQL: dropIndex requiere `table`")
-            })?;
+            let table = options
+                .table
+                .as_deref()
+                .ok_or_else(|| AppError::msg("MySQL: dropIndex requiere `table`"))?;
             format!(
                 "ALTER TABLE {}.{} DROP INDEX {}",
                 idfn(&options.schema),
@@ -225,9 +286,10 @@ pub async fn drop_index(
             )
         }
         DriverKind::Mssql => {
-            let table = options.table.as_deref().ok_or_else(|| {
-                AppError::msg("SQL Server: dropIndex requiere `table`")
-            })?;
+            let table = options
+                .table
+                .as_deref()
+                .ok_or_else(|| AppError::msg("SQL Server: dropIndex requiere `table`"))?;
             format!(
                 "DROP INDEX {} ON {}.{}",
                 idfn(&options.name),
@@ -236,7 +298,7 @@ pub async fn drop_index(
             )
         }
     };
-    run_query(conn, &sql).await.map(|_| ())
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
 fn build_create_table_sql(
@@ -246,15 +308,10 @@ fn build_create_table_sql(
     columns: &[CreateTableColumn],
     foreign_keys: &[CreateTableForeignKey],
 ) -> AppResult<String> {
-    let (ident_fn, nullable_keyword): (fn(&str) -> String, fn(bool) -> &'static str) = match driver {
-        DriverKind::Postgres => (
-            pg_ident,
-            |nullable| if nullable { "" } else { "NOT NULL" },
-        ),
-        DriverKind::Mysql => (
-            my_ident,
-            |nullable| if nullable { "" } else { "NOT NULL" },
-        ),
+    let (ident_fn, nullable_keyword): (fn(&str) -> String, fn(bool) -> &'static str) = match driver
+    {
+        DriverKind::Postgres => (pg_ident, |nullable| if nullable { "" } else { "NOT NULL" }),
+        DriverKind::Mysql => (my_ident, |nullable| if nullable { "" } else { "NOT NULL" }),
         // SQL Server is explicit about NULL/NOT NULL on every column.
         DriverKind::Mssql => (
             ms_ident,
@@ -298,10 +355,7 @@ fn build_create_table_sql(
     ))
 }
 
-fn render_fk_clause(
-    ident_fn: fn(&str) -> String,
-    fk: &CreateTableForeignKey,
-) -> AppResult<String> {
+fn render_fk_clause(ident_fn: fn(&str) -> String, fk: &CreateTableForeignKey) -> AppResult<String> {
     if fk.columns.is_empty() {
         return Err(AppError::msg("FK sin columnas locales"));
     }
@@ -312,7 +366,12 @@ fn render_fk_clause(
             fk.referenced_columns.len()
         )));
     }
-    let cols = fk.columns.iter().map(|c| ident_fn(c)).collect::<Vec<_>>().join(", ");
+    let cols = fk
+        .columns
+        .iter()
+        .map(|c| ident_fn(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     let ref_cols = fk
         .referenced_columns
         .iter()
@@ -367,7 +426,7 @@ pub async fn drop_table(
         idfn(name),
         tail
     );
-    run_query(conn, &sql).await.map(|_| ())
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
 pub async fn drop_schema(
@@ -383,7 +442,7 @@ pub async fn drop_schema(
         DriverKind::Mysql => format!("DROP DATABASE IF EXISTS {}", my_ident(name)),
         DriverKind::Mssql => format!("DROP SCHEMA IF EXISTS {}", ms_ident(name)),
     };
-    run_query(conn, &sql).await.map(|_| ())
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
 pub async fn truncate_table(
@@ -402,13 +461,8 @@ pub async fn truncate_table(
     } else {
         ""
     };
-    let sql = format!(
-        "TRUNCATE TABLE {}.{}{}",
-        idfn(schema),
-        idfn(name),
-        tail
-    );
-    run_query(conn, &sql).await.map(|_| ())
+    let sql = format!("TRUNCATE TABLE {}.{}{}", idfn(schema), idfn(name), tail);
+    run_query(conn, &sql, None).await.map(|_| ())
 }
 
 fn pg_ident(name: &str) -> String {
@@ -427,6 +481,11 @@ fn quote_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-pub fn unsupported(feature: &str) -> AppError {
-    AppError::msg(format!("not implemented yet: {feature}"))
+/// `idx_<table>_<cols>` capped at 60 chars, like core's `autoIndexName`
+/// (MySQL rejects identifiers over 64 chars; Postgres truncates at 63).
+fn auto_index_name(table: &str, columns: &[String]) -> String {
+    format!("idx_{}_{}", table, columns.join("_"))
+        .chars()
+        .take(60)
+        .collect()
 }

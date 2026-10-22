@@ -3,10 +3,10 @@
 import {
   createContext,
   useContext,
-  useEffect,
   useState,
   type ReactNode,
 } from "react";
+import { useIsomorphicLayoutEffect } from "./use-isomorphic-layout-effect";
 
 export type Theme = "minimal" | "hacker";
 
@@ -77,41 +77,50 @@ export function ThemeProvider({
   children: ReactNode;
   defaultTheme?: Theme;
 }) {
-  const [theme, setThemeState] = useState<Theme>(
-    () => defaultTheme ?? readInitialTheme(),
-  );
-  const [variant, setVariantState] = useState<ThemeVariant>(() =>
-    readInitialVariant(defaultTheme ?? readInitialTheme()),
-  );
+  // The first render uses fixed defaults so the web's server HTML and the
+  // client's hydration render match (reading localStorage here produced
+  // hydration errors and a stale active swatch in ThemeSwitcher). The
+  // persisted choice is applied right after mount, before paint; the inline
+  // themeInitScript has already set the right [data-theme] on <html>.
+  const [state, setState] = useState<{
+    theme: Theme;
+    variant: ThemeVariant;
+    /** False until the persisted preference has been read. */
+    loaded: boolean;
+  }>(() => {
+    const theme = defaultTheme ?? "minimal";
+    return { theme, variant: DEFAULT_VARIANT[theme], loaded: false };
+  });
+  const { theme, variant } = state;
 
-  useEffect(() => {
-    if (typeof document === "undefined") return;
+  useIsomorphicLayoutEffect(() => {
+    const t = defaultTheme ?? readInitialTheme();
+    setState({ theme: t, variant: readInitialVariant(t), loaded: true });
+    // Mount-only: later changes go through setTheme/setVariant.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useIsomorphicLayoutEffect(() => {
+    // Don't apply/persist the placeholder defaults of the first render.
+    if (!state.loaded) return;
     document.documentElement.dataset.theme = theme;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, theme);
-    } catch {
-      /* ignore */
-    }
-  }, [theme]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return;
     document.documentElement.dataset.themeVariant = variant;
     try {
+      window.localStorage.setItem(STORAGE_KEY, theme);
       window.localStorage.setItem(VARIANT_KEY_PREFIX + theme, variant);
     } catch {
       /* ignore */
     }
-  }, [theme, variant]);
+  }, [state.loaded, theme, variant]);
 
   const setTheme = (next: Theme) => {
-    setThemeState(next);
-    setVariantState(readInitialVariant(next));
+    setState({ theme: next, variant: readInitialVariant(next), loaded: true });
   };
 
   const setVariant = (next: ThemeVariant) => {
-    if (!isVariantFor(theme, next)) return;
-    setVariantState(next);
+    setState((s) =>
+      isVariantFor(s.theme, next) ? { ...s, variant: next, loaded: true } : s,
+    );
   };
 
   const value: ThemeCtx = {

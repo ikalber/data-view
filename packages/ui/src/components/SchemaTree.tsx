@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RelationInfo, SchemaInfo } from "@data-view/core";
 import { useTransport } from "../transport-context";
 
@@ -16,9 +16,16 @@ export function SchemaTree({ connectionId, onOpenTable }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Lets a slow listRelations notice the connection changed meanwhile.
+  const connRef = useRef(connectionId);
+  connRef.current = connectionId;
 
   useEffect(() => {
     let cancel = false;
+    // Cached tables are keyed by schema name only; another connection may
+    // have a schema with the same name ("public", "dbo"…).
+    setRelations({});
+    setExpanded(new Set());
     setLoading(true);
     setError(null);
     transport
@@ -48,8 +55,10 @@ export function SchemaTree({ connectionId, onOpenTable }: Props) {
     if (!relations[schema]) {
       try {
         const rels = await transport.listRelations(connectionId, schema);
+        if (connRef.current !== connectionId) return;
         setRelations((r) => ({ ...r, [schema]: rels }));
       } catch (e) {
+        if (connRef.current !== connectionId) return;
         setError(e instanceof Error ? e.message : String(e));
       }
     }

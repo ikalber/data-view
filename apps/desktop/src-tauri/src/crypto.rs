@@ -50,6 +50,10 @@ pub fn decrypt(encoded: &str) -> AppResult<String> {
     let nonce_bytes = B64
         .decode(parts[1])
         .map_err(|e| AppError::msg(e.to_string()))?;
+    // Nonce::from_slice panics on a wrong length (corrupted store).
+    if nonce_bytes.len() != 12 {
+        return Err(AppError::msg("unrecognized secret format"));
+    }
     let ct = B64
         .decode(parts[2])
         .map_err(|e| AppError::msg(e.to_string()))?;
@@ -59,4 +63,29 @@ pub fn decrypt(encoded: &str) -> AppResult<String> {
         .decrypt(Nonce::from_slice(&nonce_bytes), ct.as_ref())
         .map_err(|e| AppError::msg(e.to_string()))?;
     Ok(String::from_utf8(plain).map_err(|e| AppError::msg(e.to_string()))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_with_random_nonce() {
+        let a = encrypt("pässwörd 🔑").unwrap();
+        let b = encrypt("pässwörd 🔑").unwrap();
+        assert_ne!(a, b, "nonce must be random");
+        assert!(a.starts_with("v1:"));
+        assert_eq!(decrypt(&a).unwrap(), "pässwörd 🔑");
+        assert_eq!(decrypt(&b).unwrap(), "pässwörd 🔑");
+        assert_eq!(decrypt(&encrypt("").unwrap()).unwrap(), "");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(decrypt("plaintext").is_err());
+        assert!(decrypt("v1:AAAA:BBBB").is_err());
+        let mut tampered = encrypt("x").unwrap();
+        tampered.push('A');
+        assert!(decrypt(&tampered).is_err());
+    }
 }

@@ -13,6 +13,10 @@ export default auth((req) => {
     path.startsWith("/_next");
 
   if (!isLoggedIn && !isPublic) {
+    // API callers (fetch from the app) expect JSON, not the login page HTML.
+    if (path.startsWith("/api/")) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     return Response.redirect(url);

@@ -12,9 +12,20 @@ import clsx from "clsx";
 import type {
   CellValue,
   ColumnInfo,
+  DatabaseDriver,
   QueryResult,
 } from "@data-view/core";
 import { CellViewerModal } from "./CellViewerModal";
+import {
+  cellToString,
+  emptyMeansNull,
+  isBooleanType,
+  parseEnumValues,
+  rowPkKey,
+} from "../grid-sql";
+
+// Re-exported for existing importers; the implementations live in grid-sql.
+export { cellToString, parseEnumValues, rowPkKey };
 
 export type SortState = {
   column: string;
@@ -22,8 +33,12 @@ export type SortState = {
 } | null;
 
 export interface RowEdit {
-  /** column name → new value as a string ("" means empty/NULL) */
+  /** column name → new value as a string. "" means NULL, except on NOT NULL
+   * text columns where it's an empty string (see `emptyMeansNull`). */
   changes: Record<string, string>;
+  /** Original PK values of the row, captured when the edit started so the
+   * UPDATE can still be built after a sort/filter/refetch hides the row. */
+  pk?: Record<string, CellValue>;
 }
 
 /** A row staged for INSERT. `values` only contains columns the user touched —
@@ -35,6 +50,8 @@ export interface NewRow {
 
 interface Props {
   result: QueryResult | null;
+  /** Active driver — decides which column types get the boolean editor. */
+  driver?: DatabaseDriver | null;
   /** Column metadata from describeTable, indexed by name. */
   columnsInfo: Map<string, ColumnInfo>;
   /** PK column names, in order. Empty if the table has no primary key. */
@@ -67,49 +84,10 @@ interface Props {
   ) => void;
 }
 
-/** Computes a stable key for a row from its PK columns' values. */
-export function rowPkKey(
-  row: CellValue[],
-  colNameToIdx: Map<string, number>,
-  pkColumns: string[],
-): string | null {
-  if (pkColumns.length === 0) return null;
-  return pkColumns
-    .map((c) => {
-      const idx = colNameToIdx.get(c);
-      if (idx == null) return "";
-      return cellToString(row[idx]);
-    })
-    .join("");
-}
-
-/** Render a CellValue as a plain string for display / editing. */
-export function cellToString(v: CellValue | undefined): string {
-  if (v === undefined || v === null) return "";
-  if (typeof v === "object" && "__binary" in v) return `<binary ${v.bytes}B>`;
-  if (typeof v === "boolean") return v ? "true" : "false";
-  return String(v);
-}
-
-/** Detect MySQL-style enum types from the dataType string. */
-export function parseEnumValues(dataType: string | undefined): string[] | null {
-  if (!dataType) return null;
-  const m = /^enum\((.+)\)$/i.exec(dataType);
-  if (!m || !m[1]) return null;
-  const matches = m[1].match(/'((?:[^']|'')*)'/g);
-  if (!matches) return null;
-  return matches.map((s) => s.slice(1, -1).replace(/''/g, "'"));
-}
-
 function isReadOnly(col: ColumnInfo | undefined): boolean {
   if (!col) return false;
   if (col.isPrimaryKey) return true;
   return false;
-}
-
-function isBoolType(dataType: string | undefined): boolean {
-  if (!dataType) return false;
-  return /^(bool|boolean|bit\(1\)|tinyint\(1\))/i.test(dataType);
 }
 
 type EditingCell =
@@ -118,6 +96,7 @@ type EditingCell =
 
 export function EditableDataGrid({
   result,
+  driver = null,
   columnsInfo,
   pkColumns,
   edits,
@@ -430,11 +409,18 @@ export function EditableDataGrid({
               )}
               {result.columns.map((c) => {
                 const colInfo = columnsInfo.get(c.name);
-                const original = cellToString(row[colNameToIdx.get(c.name) ?? -1]);
+                const rawCell = row[colNameToIdx.get(c.name) ?? -1];
+                const original = cellToString(rawCell);
                 const editedVal = rowEdits?.[c.name];
                 const display = editedVal ?? original;
                 const dirty =
                   editedVal !== undefined && editedVal !== original;
+                // NULL vs empty string: the original cell knows; an edited
+                // "" is NULL unless the column is a NOT NULL text column.
+                const showsNull =
+                  editedVal !== undefined
+                    ? editedVal === "" && emptyMeansNull(colInfo)
+                    : rawCell === null || rawCell === undefined;
                 const readonly = !pkKey || isReadOnly(colInfo);
                 const isEditing =
                   editing?.kind === "edit" &&
@@ -478,6 +464,7 @@ export function EditableDataGrid({
                   >
                     {isEditing && pkKey ? (
                       renderEditor(
+                        driver,
                         c.name,
                         colInfo,
                         draft,
@@ -494,15 +481,14 @@ export function EditableDataGrid({
                           whiteSpace: "nowrap",
                           overflow: "hidden",
                           textOverflow: "ellipsis",
-                          fontStyle:
-                            display === "" && !dirty ? "italic" : "normal",
+                          fontStyle: showsNull ? "italic" : "normal",
                           color:
-                            display === "" && !dirty
+                            showsNull && !dirty
                               ? "var(--dv-text-mute)"
                               : undefined,
                         }}
                       >
-                        {display === "" ? "NULL" : display}
+                        {showsNull ? "NULL" : display}
                       </span>
                     )}
                   </td>
@@ -566,6 +552,7 @@ export function EditableDataGrid({
                   >
                     {isEditing ? (
                       renderEditor(
+                        driver,
                         c.name,
                         colInfo,
                         draft,
@@ -590,8 +577,12 @@ export function EditableDataGrid({
                       >
                         {!touched
                           ? placeholderText
-                          : display === ""
-                          ? "NULL"
+                          : display === "" && emptyMeansNull(colInfo)
+                          ? // An empty NOT NULL column with a default is
+                            // inserted as DEFAULT (see editValueToSql).
+                            colInfo && !colInfo.nullable && colInfo.default
+                            ? placeholderText
+                            : "NULL"
                           : display}
                       </span>
                     )}
@@ -616,6 +607,7 @@ export function EditableDataGrid({
 }
 
 function renderEditor(
+  driver: DatabaseDriver | null,
   colName: string,
   colInfo: ColumnInfo | undefined,
   draft: string,
@@ -638,7 +630,15 @@ function renderEditor(
         onKeyDown={onKeyDown}
         onBlur={onCommit}
       >
-        {colInfo?.nullable && <option value="">(NULL)</option>}
+        {colInfo?.nullable ? (
+          <option value="">(NULL)</option>
+        ) : (
+          draft === "" && (
+            <option value="" disabled>
+              —
+            </option>
+          )
+        )}
         {enumValues.map((v) => (
           <option key={v} value={v}>
             {v}
@@ -648,19 +648,33 @@ function renderEditor(
     );
   }
 
-  if (isBoolType(colInfo?.dataType)) {
+  if (isBooleanType(driver, colInfo?.dataType)) {
+    // MySQL tinyint(1) / SQL Server bit come back as 1/0 — map them onto the
+    // true/false options so the select shows the current value. An untouched
+    // draft keeps its original text, so no spurious edit is recorded.
+    const lower = draft.trim().toLowerCase();
+    const selectValue =
+      lower === "1" ? "true" : lower === "0" ? "false" : lower;
     return (
       <select
         ref={(el) => {
           ref.current = el;
         }}
         className="dv-cell-select"
-        value={draft}
+        value={selectValue}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={onKeyDown}
         onBlur={onCommit}
       >
-        {colInfo?.nullable && <option value="">(NULL)</option>}
+        {colInfo?.nullable ? (
+          <option value="">(NULL)</option>
+        ) : (
+          selectValue === "" && (
+            <option value="" disabled>
+              —
+            </option>
+          )
+        )}
         <option value="true">true</option>
         <option value="false">false</option>
       </select>

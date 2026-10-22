@@ -5,6 +5,7 @@ import type {
   CreateSchemaOptions,
   CreateTableColumn,
   CreateTableForeignKey,
+  CreateTableIndex,
   CreateTableOptions,
   DropIndexOptions,
   QueryResult,
@@ -24,19 +25,52 @@ import type {
 
 const QUERY_LIMIT = 5000;
 
-async function withConn<T>(c: ResolvedConnection, fn: (conn: mysql.Connection) => Promise<T>): Promise<T> {
-  const conn = await mysql.createConnection({
+/** BIT(n) columns arrive as Buffers (rendered as "<binary>" and exported as
+ * NULL). Decode them to their integer value instead. */
+const castBit: mysql.TypeCast = (field, next) => {
+  if (field.type === "BIT") {
+    const buf = field.buffer();
+    if (buf == null) return null;
+    let n = 0n;
+    for (const byte of buf) n = (n << 8n) | BigInt(byte);
+    return n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString();
+  }
+  return next();
+};
+
+function connectionOptions(
+  c: ResolvedConnection,
+  multipleStatements = false,
+): mysql.ConnectionOptions {
+  return {
     host: c.host,
     port: c.port,
     user: c.username,
     password: c.password,
-    database: c.database,
-    ssl: c.ssl ? {} : undefined,
+    database: c.database || undefined,
+    // Same trust model as the Postgres adapter (rejectUnauthorized: false):
+    // the UI only has an SSL on/off switch, and with mysql2's default
+    // verification any self-signed server (the MySQL default) failed.
+    ssl: c.ssl
+      ? { rejectUnauthorized: c.options?.rejectUnauthorized === "true" }
+      : undefined,
     connectTimeout: 10_000,
     rowsAsArray: true,
     dateStrings: true,
-    multipleStatements: false,
-  });
+    // BIGINT values beyond 2^53 come back as strings instead of being
+    // silently rounded (9223372036854775807 → 9223372036854776000).
+    supportBigNumbers: true,
+    typeCast: castBit,
+    multipleStatements,
+  };
+}
+
+async function withConn<T>(
+  c: ResolvedConnection,
+  fn: (conn: mysql.Connection) => Promise<T>,
+  multipleStatements = false,
+): Promise<T> {
+  const conn = await mysql.createConnection(connectionOptions(c, multipleStatements));
   try {
     return await fn(conn);
   } finally {
@@ -54,6 +88,89 @@ function normalizeCell(v: unknown) {
   if (v instanceof Date) return v.toISOString();
   if (typeof v === "object") return JSON.stringify(v);
   return v as string | number | boolean;
+}
+
+type MysqlStatementResult =
+  | { rows: unknown[][]; fields: mysql.FieldPacket[] }
+  | { header: { affectedRows?: number } };
+
+/** Split what mysql2 returns into one entry per statement. A single SELECT
+ * gives `(rows[], FieldPacket[])`, a single DML a ResultSetHeader, and a
+ * multi-statement script / CALL an array mixing both. */
+function splitResults(rows: unknown, fields: unknown): MysqlStatementResult[] {
+  if (!Array.isArray(rows)) return [{ header: rows as { affectedRows?: number } }];
+  const fieldList = Array.isArray(fields) ? (fields as unknown[]) : [];
+  const isSingleSelect =
+    fieldList.length > 0 && fieldList.every((f) => f != null && !Array.isArray(f));
+  if (isSingleSelect) {
+    return [{ rows: rows as unknown[][], fields: fields as mysql.FieldPacket[] }];
+  }
+  return rows.map((r, i) =>
+    Array.isArray(r)
+      ? { rows: r as unknown[][], fields: (fieldList[i] as mysql.FieldPacket[]) ?? [] }
+      : { header: r as { affectedRows?: number } },
+  );
+}
+
+function shapeMysqlResult(
+  rows: unknown,
+  fields: unknown,
+  durationMs: number,
+  maxRows: number,
+): QueryResult {
+  const results = splitResults(rows, fields);
+  // Show the last row set (like most SQL clients); otherwise report the
+  // rows touched by all the DML statements.
+  const sets = results.filter(
+    (r): r is { rows: unknown[][]; fields: mysql.FieldPacket[] } => "rows" in r,
+  );
+  const last = sets[sets.length - 1];
+  if (last) {
+    const truncated = last.rows.length > maxRows;
+    const cleaned = (truncated ? last.rows.slice(0, maxRows) : last.rows).map((row) =>
+      row.map(normalizeCell),
+    );
+    return {
+      columns: last.fields.map((f) => ({ name: f.name, dataType: fieldTypeName(f) })),
+      rows: cleaned as QueryResult["rows"],
+      rowCount: cleaned.length,
+      affectedRows: null,
+      durationMs,
+      truncated,
+    };
+  }
+  const affected = results.reduce(
+    (sum, r) => sum + ("header" in r ? r.header.affectedRows ?? 0 : 0),
+    0,
+  );
+  return {
+    columns: [],
+    rows: [],
+    rowCount: 0,
+    affectedRows: affected,
+    durationMs,
+    truncated: false,
+  };
+}
+
+async function runMysql(
+  c: ResolvedConnection,
+  sql: string,
+  opts: { schema?: string; params?: unknown[]; maxRows: number; multipleStatements: boolean },
+): Promise<QueryResult> {
+  return withConn(
+    c,
+    async (conn) => {
+      if (opts.schema) await conn.query(`USE ${ident(opts.schema)}`);
+      const start = Date.now();
+      const [rows, fields] = (await conn.query({ sql, values: opts.params })) as [
+        unknown,
+        unknown,
+      ];
+      return shapeMysqlResult(rows, fields, Date.now() - start, opts.maxRows);
+    },
+    opts.multipleStatements,
+  );
 }
 
 export const mysqlDriver: DriverAdapter = {
@@ -128,7 +245,7 @@ export const mysqlDriver: DriverAdapter = {
         `SELECT VERSION() AS version,
                 DATABASE() AS current_database,
                 CURRENT_USER() AS \`current_user\`,
-                NOW() AS server_time,
+                DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ') AS server_time,
                 @@max_connections AS max_connections`,
       )) as [Array<unknown[]>, unknown];
       const [version, currentDb, currentUser, serverTime, maxConn] =
@@ -214,8 +331,16 @@ export const mysqlDriver: DriverAdapter = {
 
   async describeTable(c, schema, name) {
     return withConn(c, async (conn) => {
+      const [[meta]] = (await conn.query(
+        `SELECT VERSION(),
+                (SELECT table_type FROM information_schema.tables
+                 WHERE table_schema = ? AND table_name = ?)`,
+        [schema, name],
+      )) as [Array<unknown[]>, unknown];
+      const [version, tableType] = (meta ?? []) as [string | null, string | null];
+      const isMariaDb = /mariadb/i.test(String(version ?? ""));
       const [rows] = (await conn.query(
-        `SELECT column_name, column_type, is_nullable, column_key, column_default
+        `SELECT column_name, column_type, is_nullable, column_default, extra, column_comment
          FROM information_schema.columns
          WHERE table_schema = ? AND table_name = ?
          ORDER BY ordinal_position`,
@@ -230,7 +355,7 @@ export const mysqlDriver: DriverAdapter = {
       )) as [Array<unknown[]>, unknown];
       const indexMap = new Map<string, { name: string; columns: string[]; unique: boolean; primary: boolean }>();
       for (const r of idxRows) {
-        const [indexName, nonUnique, columnName] = r as [string, number | string, string, number];
+        const [indexName, nonUnique, columnName] = r as [string, number | string, string | null, number];
         const key = indexName;
         let entry = indexMap.get(key);
         if (!entry) {
@@ -242,23 +367,35 @@ export const mysqlDriver: DriverAdapter = {
           };
           indexMap.set(key, entry);
         }
-        entry.columns.push(columnName);
+        // column_name is NULL for functional key parts (MySQL 8.0.13+).
+        entry.columns.push(columnName ?? "(expression)");
       }
+      // PK / unique flags come from the real indexes: column_key reports
+      // `PRI` for a NOT NULL UNIQUE column when the table has no primary key.
+      const pkCols = new Set(indexMap.get("PRIMARY")?.columns ?? []);
+      const uniqueCols = new Set(
+        Array.from(indexMap.values())
+          .filter((i) => i.unique && !i.primary && i.columns.length === 1)
+          .map((i) => i.columns[0]!),
+      );
       // Foreign keys: aggregate columns per constraint with GROUP_CONCAT and
-      // split client-side. update_rule / delete_rule already come as text.
+      // split client-side (unit separator, so names with commas survive).
+      // update_rule / delete_rule already come as text.
       const [fkRows] = (await conn.query(
         `SELECT
            rc.constraint_name AS name,
-           GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) AS local_cols,
+           GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR '${FK_SEP}') AS local_cols,
            rc.unique_constraint_schema AS ref_schema,
            rc.referenced_table_name AS ref_table,
-           GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position) AS ref_cols,
+           GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position SEPARATOR '${FK_SEP}') AS ref_cols,
            rc.update_rule AS on_update,
            rc.delete_rule AS on_delete
          FROM information_schema.referential_constraints rc
          JOIN information_schema.key_column_usage kcu
            ON kcu.constraint_schema = rc.constraint_schema
           AND kcu.constraint_name = rc.constraint_name
+          AND kcu.table_name = rc.table_name
+          AND kcu.referenced_table_name IS NOT NULL
          WHERE kcu.table_schema = ? AND kcu.table_name = ?
          GROUP BY rc.constraint_name, rc.unique_constraint_schema,
                   rc.referenced_table_name, rc.update_rule, rc.delete_rule
@@ -277,10 +414,10 @@ export const mysqlDriver: DriverAdapter = {
         ];
         return {
           name: fkName,
-          columns: localCols.split(","),
+          columns: localCols.split(FK_SEP),
           referencedSchema: refSchema,
           referencedTable: refTable,
-          referencedColumns: refCols.split(","),
+          referencedColumns: refCols.split(FK_SEP),
           onUpdate: onUpdate || undefined,
           onDelete: onDelete || undefined,
         };
@@ -288,16 +425,24 @@ export const mysqlDriver: DriverAdapter = {
       return {
         schema,
         name,
-        kind: "table" as const,
+        kind: tableType === "VIEW" || tableType === "SYSTEM VIEW" ? ("view" as const) : ("table" as const),
         columns: rows.map((r) => {
-          const [colName, colType, nullable, key, def] = r as [string, string, string, string, string | null];
+          const [colName, colType, nullable, def, extra, comment] = r as [
+            string,
+            string,
+            string,
+            string | null,
+            string | null,
+            string | null,
+          ];
           return {
             name: colName,
-            dataType: colType,
+            dataType: mysqlColumnType(colType, extra ?? ""),
             nullable: nullable === "YES",
-            isPrimaryKey: key === "PRI",
-            isUnique: key === "UNI",
-            default: def,
+            isPrimaryKey: pkCols.has(colName),
+            isUnique: uniqueCols.has(colName),
+            default: mysqlDefaultExpr(def, colType, extra ?? "", isMariaDb),
+            comment: comment || null,
           };
         }),
         indexes: Array.from(indexMap.values()).sort((a, b) => {
@@ -311,56 +456,32 @@ export const mysqlDriver: DriverAdapter = {
   },
 
   async runQuery(c, sql, options) {
-    const start = Date.now();
-    return withConn(c, async (conn) => {
-      if (options?.schema) {
-        await conn.query(`USE ${"`" + options.schema.replace(/`/g, "``") + "`"}`);
-      }
-      const [rows, fields] = (await conn.query({
-        sql,
-        values: options?.params,
-      })) as [unknown, mysql.FieldPacket[] | undefined];
-
-      // For SELECT-style queries `rows` is an array of arrays (rowsAsArray=true).
-      // For DML it's an OkPacket-like object.
-      if (Array.isArray(rows) && fields) {
-        const columns: QueryResultColumn[] = fields.map((f) => ({
-          name: f.name,
-          dataType: typeName(f.type ?? -1),
-        }));
-        const cleaned = (rows as Array<unknown[]>).map((row) => row.map(normalizeCell));
-        return {
-          columns,
-          rows: cleaned as QueryResult["rows"],
-          rowCount: cleaned.length,
-          affectedRows: null,
-          durationMs: Date.now() - start,
-          truncated: cleaned.length === QUERY_LIMIT,
-        };
-      }
-      const okPacket = rows as { affectedRows?: number };
-      return {
-        columns: [],
-        rows: [],
-        rowCount: 0,
-        affectedRows: okPacket.affectedRows ?? 0,
-        durationMs: Date.now() - start,
-        truncated: false,
-      };
+    // The SQL editor sends whole scripts, so allow several statements here
+    // (fetchTableData/iterateTable keep them disabled for the raw WHERE).
+    return runMysql(c, sql, {
+      schema: options?.schema,
+      params: options?.params,
+      maxRows: QUERY_LIMIT,
+      multipleStatements: true,
     });
   },
 
   async fetchTableData(c, schema, name, options) {
-    const limit = Math.min(options?.limit ?? 100, QUERY_LIMIT);
-    const offset = options?.offset ?? 0;
+    const limit = Math.max(0, Math.min(options?.limit ?? 100, QUERY_LIMIT));
+    const offset = Math.max(0, options?.offset ?? 0);
     const orderBy = options?.orderBy?.length
       ? `ORDER BY ${options.orderBy
-          .map((o) => `${ident(o.column)} ${o.direction.toUpperCase()}`)
+          .map((o) => `${ident(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`)
           .join(", ")}`
       : "";
     const where = options?.where?.trim() ? `WHERE ${options.where.trim()}` : "";
+    // One extra row tells `truncated` whether another page exists.
     const sql = `SELECT * FROM ${ident(schema)}.${ident(name)} ${where} ${orderBy} LIMIT ? OFFSET ?`;
-    return this.runQuery(c, sql, { params: [limit, offset] });
+    return runMysql(c, sql, {
+      params: [limit + 1, offset],
+      maxRows: limit,
+      multipleStatements: false,
+    });
   },
 
   async *iterateTable(c, opts) {
@@ -371,18 +492,7 @@ export const mysqlDriver: DriverAdapter = {
     const batchSize = Math.max(1, opts.batchSize ?? 1000);
     const where = opts.where?.trim() ? `WHERE ${opts.where.trim()}` : "";
     const sql = `SELECT * FROM ${ident(opts.schema)}.${ident(opts.name)} ${where}`;
-    const conn = await mysql.createConnection({
-      host: c.host,
-      port: c.port,
-      user: c.username,
-      password: c.password,
-      database: c.database,
-      ssl: c.ssl ? {} : undefined,
-      connectTimeout: 10_000,
-      rowsAsArray: true,
-      dateStrings: true,
-      multipleStatements: false,
-    });
+    const conn = await mysql.createConnection(connectionOptions(c));
     try {
       // The promise wrapper hides the streaming API; reach through to the
       // underlying connection where .query() returns a Query object with
@@ -395,29 +505,22 @@ export const mysqlDriver: DriverAdapter = {
       });
       let batchRows: unknown[][] = [];
       let columns: QueryResultColumn[] = [];
-      let fields: mysql.FieldPacket[] | null = null;
-      // Capture column metadata via the 'fields' event.
+      let yielded = false;
+      // Capture column metadata via the 'fields' event (emitted before rows).
       (stream as NodeJS.EventEmitter).on("fields", (f: mysql.FieldPacket[]) => {
-        fields = f;
-        columns = f.map((field) => ({
-          name: field.name,
-          dataType: typeName(field.type ?? -1),
-        }));
+        columns = f.map((field) => ({ name: field.name, dataType: fieldTypeName(field) }));
       });
       for await (const row of stream as AsyncIterable<unknown>) {
-        if (columns.length === 0 && fields) {
-          columns = (fields as mysql.FieldPacket[]).map((field) => ({
-            name: field.name,
-            dataType: typeName(field.type ?? -1),
-          }));
-        }
         batchRows.push((row as unknown[]).map(normalizeCell));
         if (batchRows.length >= batchSize) {
+          yielded = true;
           yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
           batchRows = [];
         }
       }
-      if (batchRows.length > 0) {
+      // An empty table still yields one (empty) batch so exporters get the
+      // column list for headers.
+      if (batchRows.length > 0 || !yielded) {
         yield { columns, rows: batchRows as QueryResult["rows"] } as TableBatch;
       }
     } finally {
@@ -439,20 +542,16 @@ export const mysqlDriver: DriverAdapter = {
   },
 
   async createTable(c, options) {
+    // Indexes go inline in the CREATE TABLE: MySQL DDL auto-commits, so a
+    // separate failing CREATE INDEX would leave a half-created table behind.
     const sqlText = buildMysqlCreateTableFromDraft(
       options.schema,
       options.name,
       options.columns,
       options.foreignKeys,
+      options.indexes,
     );
     await this.runQuery(c, sqlText);
-    for (const idx of options.indexes ?? []) {
-      await this.createIndex(c, {
-        schema: options.schema,
-        table: options.name,
-        ...idx,
-      });
-    }
   },
 
   async createIndex(c, options) {
@@ -518,6 +617,7 @@ function buildMysqlCreateTableFromDraft(
   name: string,
   columns: CreateTableColumn[],
   foreignKeys: CreateTableForeignKey[] | undefined,
+  indexes?: CreateTableIndex[],
 ): string {
   if (!schema.trim()) throw new Error("Database requerida");
   if (!name.trim()) throw new Error("Nombre de tabla requerido");
@@ -535,6 +635,12 @@ function buildMysqlCreateTableFromDraft(
     .map((c) => qiCore("mysql", c.name));
   if (pk.length > 0) {
     colLines.push(`  PRIMARY KEY (${pk.join(", ")})`);
+  }
+  for (const idx of indexes ?? []) {
+    if (idx.columns.length === 0) throw new Error("Agregá al menos una columna al índice");
+    const idxName = (idx.name ?? autoIndexName(name, idx.columns)).trim();
+    const cols = idx.columns.map((col) => qiCore("mysql", col)).join(", ");
+    colLines.push(`  ${idx.unique ? "UNIQUE " : ""}INDEX ${qiCore("mysql", idxName)} (${cols})`);
   }
   for (const fk of foreignKeys ?? []) {
     colLines.push("  " + renderForeignKeyClause("mysql", fk));
@@ -561,8 +667,51 @@ function buildMysqlCreateIndexSql(options: CreateIndexOptions): string {
   )} ON ${fqTable} (${cols});`;
 }
 
+const FK_SEP = "\u001f";
+
+/** column_type plus the attributes from EXTRA that are part of the column
+ * definition (AUTO_INCREMENT, ON UPDATE …). Without them a generated
+ * CREATE TABLE — or the structure editor's `CHANGE COLUMN` — silently drops
+ * them. */
+function mysqlColumnType(columnType: string, extra: string): string {
+  const parts = [columnType];
+  if (/\bauto_increment\b/i.test(extra)) parts.push("auto_increment");
+  const onUpdate = /\bon update (\S+)/i.exec(extra);
+  if (onUpdate) parts.push(`on update ${onUpdate[1]}`);
+  return parts.join(" ");
+}
+
+const NUMERIC_COLUMN = /^(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|year)\b/i;
+
+/**
+ * information_schema.columns.column_default holds the *unquoted* literal on
+ * MySQL (`active` for DEFAULT 'active'), which isn't valid SQL to paste after
+ * `DEFAULT`. Turn it into an SQL expression, the same shape Postgres / SQL
+ * Server report. MariaDB (10.2.7+) already returns expressions.
+ */
+function mysqlDefaultExpr(
+  def: string | null,
+  columnType: string,
+  extra: string,
+  isMariaDb: boolean,
+): string | null {
+  if (def == null) return null;
+  if (isMariaDb) return def === "NULL" ? null : def;
+  if (/\bDEFAULT_GENERATED\b/i.test(extra)) {
+    // CURRENT_TIMESTAMP[(n)] is allowed bare; other expressions need parens.
+    // MySQL escapes quotes inside the stored expression as \'.
+    if (/^(current_timestamp|now|localtime|localtimestamp)(\(\d*\))?$/i.test(def)) return def;
+    return `(${def.replace(/\\'/g, "'")})`;
+  }
+  if (NUMERIC_COLUMN.test(columnType) && /^-?\d+(\.\d+)?(e[-+]?\d+)?$/i.test(def)) return def;
+  if (/^bit\b/i.test(columnType) && /^b'[01]*'$/.test(def)) return def;
+  return quoteStringMysql(def);
+}
+
 function quoteStringMysql(s: string): string {
-  return "'" + s.replace(/'/g, "''") + "'";
+  // Default sql_mode treats backslash as an escape char inside '…', so it has
+  // to be doubled too (before the quotes) or `abc\` breaks the literal.
+  return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
 }
 
 export type { IterateTableOptions };
@@ -590,6 +739,15 @@ const TYPES: Record<number, string> = {
   253: "varchar",
   254: "char",
 };
-function typeName(code: number) {
+/** Character set 63 is `binary`: tells BLOB from TEXT and VARBINARY from
+ * VARCHAR, which share the same wire type codes. */
+const BINARY_CHARSET = 63;
+
+function fieldTypeName(f: mysql.FieldPacket): string {
+  const code = f.columnType ?? f.type ?? -1;
+  const binary = f.characterSet === BINARY_CHARSET;
+  if (code === 252) return binary ? "blob" : "text";
+  if (code === 253 || code === 15) return binary ? "varbinary" : "varchar";
+  if (code === 254) return binary ? "binary" : "char";
   return TYPES[code] ?? `type:${code}`;
 }

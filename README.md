@@ -154,6 +154,7 @@ Cualquier host de Next.js sirve (Vercel, Render, Railway, fly.io, VPS). Tené en
 
 - `better-sqlite3` es nativo. Si tu host no permite módulos nativos, reemplazá por Postgres como store usando los mismos repos.
 - `AUTH_SECRET` y `DATA_VIEW_MASTER_KEY` son **obligatorios** en prod. Si rotás la master key, las contraseñas guardadas dejan de poder descifrarse.
+- Fuera de Vercel, seteá también `AUTH_URL=https://tu-dominio` (o `AUTH_TRUST_HOST=true` si corre detrás de un reverse proxy). Sin eso, Auth.js rechaza todos los requests en producción con `UntrustedHost` y no se puede ingresar.
 
 ---
 
@@ -191,6 +192,31 @@ pnpm --filter @data-view/desktop tauri:dev     # arranca también el binario Rus
 pnpm build:web
 pnpm build:desktop
 ```
+
+## Tests
+
+```bash
+pnpm test                 # vitest: core, UI (lógica pura), repos y API web
+cd apps/desktop/src-tauri && cargo test --lib   # backend Rust
+```
+
+Los tests de integración contra bases reales (drivers web, SQL generado por la UI y backend Rust) se saltean solos si no están las variables de entorno. Para correrlos, levantá las tres bases con Docker:
+
+```bash
+docker run -d --name dv-test-pg    -e POSTGRES_PASSWORD=test -p 127.0.0.1:15432:5432 postgres:16-alpine
+docker run -d --name dv-test-mysql -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:13306:3306 mysql:8.0
+docker run -d --name dv-test-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Test_Passw0rd!' \
+  -p 127.0.0.1:11433:1433 mcr.microsoft.com/mssql/server:2022-latest
+
+export DV_TEST_PG_URL=postgres://postgres:test@127.0.0.1:15432/postgres
+export DV_TEST_MYSQL_URL=mysql://root:test@127.0.0.1:13306/mysql
+export DV_TEST_MSSQL_URL='mssql://sa:Test_Passw0rd!@127.0.0.1:11433/master'
+pnpm test && (cd apps/desktop/src-tauri && cargo test --lib)
+```
+
+Los tests crean sus objetos con prefijo `dvt_` y los borran al terminar.
+
+---
 
 ## Roadmap
 

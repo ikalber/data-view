@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   TAG_COLORS,
@@ -521,12 +521,20 @@ function FolderRow({
 }: FolderRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(label);
+  // Set on Escape so the blur that follows the input unmounting doesn't
+  // commit the discarded draft.
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     setDraft(label);
   }, [label]);
 
   const editable = !!onRename;
+
+  function startEditing() {
+    cancelledRef.current = false;
+    setEditing(true);
+  }
 
   return (
     <div
@@ -543,13 +551,19 @@ function FolderRow({
           onClick={(e) => e.stopPropagation()}
           onBlur={() => {
             setEditing(false);
+            if (cancelledRef.current) return;
             if (draft.trim() && draft.trim() !== label) onRename?.(draft);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
+              cancelledRef.current = true; // committed here; skip the blur
               setEditing(false);
               if (draft.trim() && draft.trim() !== label) onRename?.(draft);
             } else if (e.key === "Escape") {
+              // Only cancel the rename: without this the modal's document
+              // Escape listener closed the whole dialog too.
+              e.stopPropagation();
+              cancelledRef.current = true;
               setEditing(false);
               setDraft(label);
             }
@@ -561,7 +575,7 @@ function FolderRow({
           onDoubleClick={(e) => {
             if (!editable) return;
             e.stopPropagation();
-            setEditing(true);
+            startEditing();
           }}
         >
           {label}
@@ -579,7 +593,7 @@ function FolderRow({
             type="button"
             className="dv-icon-button"
             title="Renombrar"
-            onClick={() => setEditing(true)}
+            onClick={startEditing}
           >
             ✎
           </button>
@@ -608,10 +622,17 @@ interface TagRowProps {
 function TagRow({ tag, disabled, onRename, onChangeColor, onDelete }: TagRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tag.name);
+  // See FolderRow.
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     setDraft(tag.name);
   }, [tag.name]);
+
+  function startEditing() {
+    cancelledRef.current = false;
+    setEditing(true);
+  }
 
   return (
     <div className="dv-manage-tag-row">
@@ -624,20 +645,24 @@ function TagRow({ tag, disabled, onRename, onChangeColor, onDelete }: TagRowProp
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => {
             setEditing(false);
+            if (cancelledRef.current) return;
             if (draft.trim() && draft.trim() !== tag.name) onRename(draft);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
+              cancelledRef.current = true; // committed here; skip the blur
               setEditing(false);
               if (draft.trim() && draft.trim() !== tag.name) onRename(draft);
             } else if (e.key === "Escape") {
+              e.stopPropagation();
+              cancelledRef.current = true;
               setEditing(false);
               setDraft(tag.name);
             }
           }}
         />
       ) : (
-        <span className="dv-manage-tag-name" onDoubleClick={() => setEditing(true)}>
+        <span className="dv-manage-tag-name" onDoubleClick={startEditing}>
           {tag.name}
           {tag.kind === "system" && (
             <span className="dv-manage-tag-kind">sistema</span>
@@ -650,7 +675,7 @@ function TagRow({ tag, disabled, onRename, onChangeColor, onDelete }: TagRowProp
           type="button"
           className="dv-icon-button"
           title="Renombrar"
-          onClick={() => setEditing(true)}
+          onClick={startEditing}
           disabled={disabled}
         >
           ✎

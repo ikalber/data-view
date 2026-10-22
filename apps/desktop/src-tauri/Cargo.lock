@@ -952,6 +952,7 @@ dependencies = [
  "postgres-types",
  "rand 0.8.6",
  "rust_decimal",
+ "rustls 0.23.40",
  "serde",
  "serde_json",
  "tauri",
@@ -962,6 +963,7 @@ dependencies = [
  "tiberius",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "uuid",
 ]

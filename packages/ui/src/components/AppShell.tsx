@@ -23,6 +23,7 @@ import {
 } from "@data-view/core";
 import type { TabGroup } from "./workspace-tab";
 import { useTransport } from "../transport-context";
+import { useIsomorphicLayoutEffect } from "../use-isomorphic-layout-effect";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ConnectionForm } from "./ConnectionForm";
 import { ConnectionOverviewPane } from "./ConnectionOverviewPane";
@@ -42,6 +43,18 @@ import {
   tabIdentityKey,
   type WorkspaceTab,
 } from "./workspace-tab";
+import {
+  assignTabToGroup,
+  closeTabs,
+  expandGroupOf,
+  focusAfterCollapse,
+  isSqlTabDirty,
+  moveTab,
+  pruneGroups,
+  restoreWorkspace,
+  ungroupTab,
+  type DropPlace,
+} from "./workspace-state";
 
 interface Props {
   /** Right-side slot in the topbar (user menu, sign-out link, etc). */
@@ -59,12 +72,17 @@ interface Props {
    * reads the file via FileReader.
    */
   onPickSqlFile?: () => Promise<{ name: string; sql: string } | null>;
+  /** App version shown in the sidebar footer (e.g. "1.1.1"). Hidden when
+   * omitted. */
+  appVersion?: string;
 }
 
 const TABS_KEY = (id: string) => `dbview.workspaceTabs.${id}`;
 const ACTIVE_KEY = (id: string) => `dbview.workspaceActiveTab.${id}`;
 const FILES_KEY = (id: string) => `dbview.sqlFiles.${id}`;
 const GROUPS_KEY = (id: string) => `dbview.tabGroups.${id}`;
+// Last active connection, so a reload reopens the workspace the user was on.
+const ACTIVE_CONNECTION_KEY = "dbview.activeConnection";
 const SIDEBAR_WIDTH_KEY = "dbview.sidebarWidth";
 // Mínimo: bajo eso la lista de tablas pierde legibilidad. Máximo: más de eso
 // roba demasiado al área de trabajo en pantallas chicas.
@@ -72,6 +90,8 @@ const SIDEBAR_WIDTH_MIN = 180;
 const SIDEBAR_WIDTH_MAX = 520;
 const SIDEBAR_WIDTH_DEFAULT = 264;
 const GLOBAL_TREE_KEY = "dbview.globalTreeView";
+// Same cap the desktop picker enforces; bigger files freeze the editor.
+const MAX_SQL_FILE_BYTES = 16 * 1024 * 1024;
 
 function readInitialGlobalTreeView(): boolean {
   if (typeof window === "undefined") return false;
@@ -127,6 +147,7 @@ export function AppShell({
   userArea,
   enableCloseTabShortcut,
   onPickSqlFile,
+  appVersion,
 }: Props) {
   const transport = useTransport();
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
@@ -204,14 +225,20 @@ export function AppShell({
 
   // Global tree view: ignores the active connection and lets the user navigate
   // every connection's databases/tables from the sidebar at once.
-  const [globalTreeView, setGlobalTreeView] = useState<boolean>(() =>
-    readInitialGlobalTreeView(),
-  );
+  // Starts false and is read from localStorage after mount: reading it in the
+  // useState initializer made the web's SSR markup differ from the client's
+  // first render (hydration error).
+  const [globalTreeView, setGlobalTreeView] = useState(false);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  useIsomorphicLayoutEffect(() => {
+    if (readInitialGlobalTreeView()) setGlobalTreeView(true);
+  }, []);
+
+  const toggleGlobalTreeView = useCallback(() => {
+    const next = !globalTreeView;
+    setGlobalTreeView(next);
     try {
-      window.localStorage.setItem(GLOBAL_TREE_KEY, globalTreeView ? "1" : "0");
+      window.localStorage.setItem(GLOBAL_TREE_KEY, next ? "1" : "0");
     } catch {
       /* ignore */
     }
@@ -227,7 +254,15 @@ export function AppShell({
       setConnections(list);
       setFolders(fs);
       setTags(ts);
-      setActiveId((prev) => prev ?? list[0]?.id ?? null);
+      // Keep the active connection only while it still exists (it may have
+      // been deleted elsewhere); otherwise fall back to the last one used,
+      // then to the first one.
+      setActiveId((prev) => {
+        if (prev && list.some((c) => c.id === prev)) return prev;
+        const last = readJSON<unknown>(ACTIVE_CONNECTION_KEY, null);
+        if (typeof last === "string" && list.some((c) => c.id === last)) return last;
+        return list[0]?.id ?? null;
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -242,6 +277,10 @@ export function AppShell({
     [connections, activeId],
   );
 
+  useEffect(() => {
+    if (activeId) writeJSON(ACTIVE_CONNECTION_KEY, activeId);
+  }, [activeId]);
+
   // Hydrate tabs/files/groups when the active connection changes.
   useEffect(() => {
     if (!activeId) {
@@ -252,30 +291,36 @@ export function AppShell({
       setSchemas([]);
       setHydratedFor(null);
       setActiveSchema(null);
+      setError(null);
       return;
     }
-    const loadedTabs = readJSON<WorkspaceTab[]>(TABS_KEY(activeId), []);
-    const loadedActive = readJSON<string | null>(ACTIVE_KEY(activeId), null);
-    const loadedFiles = readJSON<SavedFile[]>(FILES_KEY(activeId), []);
-    const loadedGroups = readJSON<TabGroup[]>(GROUPS_KEY(activeId), []);
-    if (loadedTabs.length === 0) {
-      const t: WorkspaceTab = { id: uid(), kind: "connection-overview" };
-      setTabs([t]);
-      setActiveTabId(t.id);
-    } else {
-      setTabs(loadedTabs);
-      setActiveTabId(
-        loadedActive && loadedTabs.some((t) => t.id === loadedActive)
-          ? loadedActive
-          : loadedTabs[0]!.id,
-      );
-    }
-    setFiles(loadedFiles);
-    setGroups(loadedGroups);
+    // Storage may hold data from older versions or be corrupt; restore it
+    // defensively instead of trusting the shape.
+    const restored = restoreWorkspace(
+      {
+        tabs: readJSON<unknown>(TABS_KEY(activeId), []),
+        activeTabId: readJSON<unknown>(ACTIVE_KEY(activeId), null),
+        groups: readJSON<unknown>(GROUPS_KEY(activeId), []),
+        files: readJSON<unknown>(FILES_KEY(activeId), []),
+      },
+      uid,
+    );
+    setTabs(restored.tabs);
+    setActiveTabId(restored.activeTabId);
+    setFiles(restored.files);
+    setGroups(restored.groups);
     setSchemas([]);
     setActiveSchema(null);
+    // Errors belong to the previous connection.
+    setError(null);
     setHydratedFor(activeId);
   }, [activeId]);
+
+  // Until the hydration effect above has run for the current connection,
+  // `tabs`/`activeSchema` still belong to the previous one. Rendering them
+  // against the new connection fired queries for the old tables/schemas on
+  // the new server, so the workspace waits for this flag.
+  const hydrated = activeId !== null && hydratedFor === activeId;
 
   // Persist after hydration.
   useEffect(() => {
@@ -296,9 +341,41 @@ export function AppShell({
   }, [hydratedFor, activeId, groups]);
 
   const activeTab = useMemo(
-    () => tabs.find((t) => t.id === activeTabId) ?? null,
-    [tabs, activeTabId],
+    () => (hydrated ? tabs.find((t) => t.id === activeTabId) ?? null : null),
+    [hydrated, tabs, activeTabId],
   );
+
+  // Groups without members are dropped whatever emptied them (closing tabs,
+  // moving the last tab elsewhere, …) so they don't linger in "Agregar a
+  // grupo".
+  // Keyed on group membership only: depending on `tabs` ran this on every
+  // keystroke in a SQL tab, and the extra state update per keystroke piled up
+  // with CodeMirror's synchronous dispatches into "Maximum update depth
+  // exceeded" while typing fast.
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const usedGroupIds = useMemo(
+    () =>
+      Array.from(new Set(tabs.map((t) => t.groupId).filter(Boolean)))
+        .sort()
+        .join("\u0001"),
+    [tabs],
+  );
+  useEffect(() => {
+    if (!hydrated) return;
+    setGroups((gs) => pruneGroups(gs, tabsRef.current));
+  }, [hydrated, usedGroupIds]);
+
+  // Focusing a tab that sits inside a collapsed group (e.g. clicking in the
+  // sidebar a table whose tab is grouped) expands the group, so the active
+  // tab is never invisible in the tab bar.
+  useEffect(() => {
+    if (!hydrated) return;
+    setGroups((gs) => expandGroupOf(gs, tabs, activeTabId));
+    // Only on focus changes: collapsing the active tab's group on purpose
+    // (when there's nothing else to focus) must stick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, activeTabId]);
 
   // Keep activeSchema in sync with whatever the active tab is targeting, so
   // the sidebar's table list follows the user's focus.
@@ -397,48 +474,30 @@ export function AppShell({
     );
   }, []);
 
+  /** Close tabs without asking (callers handle confirmation). Focus moves to
+   * the nearest visible tab; emptied groups are pruned by the effect above. */
+  const closeTabIds = useCallback(
+    (ids: string[]) => {
+      const next = closeTabs({ tabs, activeTabId }, ids, groups, uid);
+      if (next.tabs !== tabs) setTabs(next.tabs);
+      if (next.activeTabId !== activeTabId) setActiveTabId(next.activeTabId);
+    },
+    [tabs, activeTabId, groups],
+  );
+
   const closeTab = useCallback(
     (id: string) => {
-      const idx = tabs.findIndex((t) => t.id === id);
-      if (idx < 0) return;
-      const target = tabs[idx]!;
-      if (target.kind === "sql") {
-        const linkedFile = target.fileId
-          ? files.find((f) => f.id === target.fileId)
-          : null;
-        const dirty = target.fileId == null
-          ? target.sql.length > 0
-          : !linkedFile || linkedFile.sql !== target.sql;
-        if (dirty) {
-          const ok = window.confirm(
-            `Tenés cambios sin guardar en "${target.title}". ¿Cerrar igual?`,
-          );
-          if (!ok) return;
-        }
+      const target = tabs.find((t) => t.id === id);
+      if (!target) return;
+      if (target.kind === "sql" && isSqlTabDirty(target, files)) {
+        const ok = window.confirm(
+          `Tenés cambios sin guardar en "${target.title}". ¿Cerrar igual?`,
+        );
+        if (!ok) return;
       }
-      const next = tabs.filter((t) => t.id !== id);
-      if (next.length === 0) {
-        const fallback: WorkspaceTab = {
-          id: uid(),
-          kind: "connection-overview",
-        };
-        setTabs([fallback]);
-        setActiveTabId(fallback.id);
-      } else {
-        setTabs(next);
-        if (id === activeTabId) {
-          const fallback = next[Math.max(0, idx - 1)] ?? next[0];
-          if (fallback) setActiveTabId(fallback.id);
-        }
-      }
-      if (target.groupId) {
-        const stillUsed = next.some((t) => t.groupId === target.groupId);
-        if (!stillUsed) {
-          setGroups((gs) => gs.filter((g) => g.id !== target.groupId));
-        }
-      }
+      closeTabIds([id]);
     },
-    [activeTabId, files, tabs],
+    [closeTabIds, files, tabs],
   );
 
   // Ctrl/Cmd+W para cerrar la pestaña activa (solo desktop). En navegador no
@@ -458,75 +517,30 @@ export function AppShell({
   }, [enableCloseTabShortcut, activeTabId, closeTab]);
 
   // ── Tab groups ─────────────────────────────────────────────────────────────
+  // Group members must stay contiguous (the tab bar renders one header per
+  // run of tabs); the helpers in workspace-state take care of that.
 
-  /** Move tabs with `tabIds` to live contiguously, in their existing relative
-   * order, immediately after the tab at `anchorIdx` (or at the start if -1). */
-  function reorderContiguous(
-    list: WorkspaceTab[],
-    tabIds: Set<string>,
-    anchorIdx: number,
-  ): WorkspaceTab[] {
-    const moving = list.filter((t) => tabIds.has(t.id));
-    const remaining = list.filter((t) => !tabIds.has(t.id));
-    const insertAt = Math.min(remaining.length, anchorIdx + 1);
-    return [
-      ...remaining.slice(0, insertAt),
-      ...moving,
-      ...remaining.slice(insertAt),
-    ];
-  }
-
-  const addTabToGroup = useCallback(
-    (tabId: string, groupId: string) => {
-      setTabs((prev) => {
-        const updated = prev.map((t) =>
-          // Pin while assigning — grouping a tab is an explicit "keep this
-          // around" gesture, so it shouldn't stay swappable as a preview.
-          t.id === tabId ? { ...t, groupId, isPreview: false } : t,
-        );
-        // Place this tab adjacent to its group's other members.
-        const groupTabIds = new Set(
-          updated.filter((t) => t.groupId === groupId).map((t) => t.id),
-        );
-        const firstGroupIdx = updated.findIndex(
-          (t) => t.groupId === groupId && t.id !== tabId,
-        );
-        if (firstGroupIdx < 0) return updated;
-        const lastGroupIdx = updated
-          .map((t, i) => ({ t, i }))
-          .filter(({ t }) => t.groupId === groupId && t.id !== tabId)
-          .reduce((acc, x) => Math.max(acc, x.i), -1);
-        return reorderContiguous(updated, groupTabIds, lastGroupIdx);
-      });
-    },
-    [],
-  );
+  const addTabToGroup = useCallback((tabId: string, groupId: string) => {
+    setTabs((prev) => assignTabToGroup(prev, tabId, groupId));
+  }, []);
 
   const createGroupFromTab = useCallback((tabId: string, name: string) => {
     const id = uid();
     setGroups((gs) => [...gs, { id, name, collapsed: false }]);
-    setTabs((prev) =>
-      prev.map((t) =>
-        t.id === tabId ? { ...t, groupId: id, isPreview: false } : t,
-      ),
-    );
+    setTabs((prev) => assignTabToGroup(prev, tabId, id));
   }, []);
 
   const removeTabFromGroup = useCallback((tabId: string) => {
-    setTabs((prev) => {
-      const target = prev.find((t) => t.id === tabId);
-      if (!target?.groupId) return prev;
-      const oldGroupId = target.groupId;
-      const updated = prev.map((t) =>
-        t.id === tabId ? { ...t, groupId: null } : t,
-      );
-      const stillUsed = updated.some((t) => t.groupId === oldGroupId);
-      if (!stillUsed) {
-        setGroups((gs) => gs.filter((g) => g.id !== oldGroupId));
-      }
-      return updated;
-    });
+    setTabs((prev) => ungroupTab(prev, tabId));
   }, []);
+
+  /** Drag & drop reorder from the tab bar. */
+  const reorderTab = useCallback(
+    (dragId: string, targetId: string, place: DropPlace) => {
+      setTabs((prev) => moveTab(prev, dragId, targetId, place));
+    },
+    [],
+  );
 
   const renameGroup = useCallback((groupId: string, name: string) => {
     setGroups((gs) => gs.map((g) => (g.id === groupId ? { ...g, name } : g)));
@@ -545,12 +559,8 @@ export function AppShell({
       const willCollapse =
         groups.find((g) => g.id === groupId)?.collapsed === false;
       if (!willCollapse) return;
-      const active = tabs.find((t) => t.id === activeTabId);
-      if (!active || active.groupId !== groupId) return;
-      const fallback = tabs.find(
-        (t) => t.id !== active.id && t.groupId !== groupId,
-      );
-      if (fallback) setActiveTabId(fallback.id);
+      const fallback = focusAfterCollapse(tabs, groups, activeTabId, groupId);
+      if (fallback) setActiveTabId(fallback);
     },
     [groups, activeTabId, tabs],
   );
@@ -567,28 +577,22 @@ export function AppShell({
       const group = groups.find((g) => g.id === groupId);
       const groupTabs = tabs.filter((t) => t.groupId === groupId);
       if (groupTabs.length === 0) return;
+      const dirty = groupTabs.filter((t) => isSqlTabDirty(t, files)).length;
       const ok = window.confirm(
         `¿Cerrar ${groupTabs.length} pestaña${
           groupTabs.length === 1 ? "" : "s"
-        } del grupo "${group?.name ?? ""}"?`,
+        } del grupo "${group?.name ?? ""}"?${
+          dirty > 0
+            ? `\n\n${dirty} ${
+                dirty === 1 ? "tiene" : "tienen"
+              } cambios sin guardar que se van a perder.`
+            : ""
+        }`,
       );
       if (!ok) return;
-      let next = tabs.filter((t) => !groupTabs.some((g) => g.id === t.id));
-      if (next.length === 0) {
-        const fallback: WorkspaceTab = {
-          id: uid(),
-          kind: "connection-overview",
-        };
-        next = [fallback];
-        setActiveTabId(fallback.id);
-      } else if (groupTabs.some((g) => g.id === activeTabId)) {
-        const fallback = next.find((t) => t.groupId !== groupId) ?? next[0];
-        if (fallback) setActiveTabId(fallback.id);
-      }
-      setTabs(next);
-      setGroups((gs) => gs.filter((g) => g.id !== groupId));
+      closeTabIds(groupTabs.map((t) => t.id));
     },
-    [groups, tabs, activeTabId],
+    [groups, tabs, files, closeTabIds],
   );
 
   const openSql = useCallback(
@@ -619,6 +623,13 @@ export function AppShell({
   // command. In the browser we lazy-create a hidden `<input type="file">` so
   // the user picks via the OS dialog and FileReader gives us the contents.
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(
+    () => () => {
+      fileInputRef.current?.remove();
+      fileInputRef.current = null;
+    },
+    [],
+  );
   const openSqlFromDisk = useCallback(async () => {
     try {
       if (onPickSqlFile) {
@@ -643,9 +654,18 @@ export function AppShell({
           const f = input.files?.[0] ?? null;
           resolve(f);
         };
+        // Dismissing the picker fires `cancel` (no `change`); without this the
+        // promise stayed pending forever.
+        input.oncancel = () => resolve(null);
         input.click();
       });
       if (!file) return;
+      if (file.size > MAX_SQL_FILE_BYTES) {
+        setError(
+          `"${file.name}" pesa ${(file.size / 1024 / 1024).toFixed(1)} MB; el máximo para abrir en el editor es 16 MB.`,
+        );
+        return;
+      }
       const sql = await file.text();
       openSql(sql, { title: stripSqlExt(file.name) });
     } catch (e) {
@@ -663,7 +683,8 @@ export function AppShell({
 
   // Fetches the table's column metadata and opens a SQL editor tab seeded
   // with the requested DML skeleton. Right-click → Generar X in the sidebar
-  // routes through here.
+  // routes through here. `connId` comes from the clicked item, which in the
+  // global tree may belong to a connection that isn't active yet.
   const generateSqlFor = useCallback(
     async (
       connId: string,
@@ -701,7 +722,10 @@ export function AppShell({
             text = generateFullTableDDL(driver ?? "postgres", details);
             break;
         }
-        openSql(text, { title: `${name}.${kind}` });
+        // Target the table's schema explicitly: when the action came from
+        // another connection in the global tree, this callback's
+        // `activeSchema` still belongs to the previous connection.
+        openSql(text, { title: `${name}.${kind}`, database: schema });
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -945,15 +969,7 @@ export function AppShell({
   // Dirty set for tab-bar dots — only SQL tabs can be dirty.
   const dirtyTabIds = useMemo(() => {
     const set = new Set<string>();
-    for (const t of tabs) {
-      if (t.kind !== "sql") continue;
-      if (t.fileId == null) {
-        if (t.sql.length > 0) set.add(t.id);
-      } else {
-        const f = files.find((x) => x.id === t.fileId);
-        if (!f || f.sql !== t.sql) set.add(t.id);
-      }
-    }
+    for (const t of tabs) if (isSqlTabDirty(t, files)) set.add(t.id);
     return set;
   }, [tabs, files]);
 
@@ -972,7 +988,9 @@ export function AppShell({
           <OverviewPane
             connection={active}
             activeSchema={tab.schema}
-            onOpenSqlEditor={() => openSql(`-- ${tab.schema}\n`)}
+            onOpenSqlEditor={() =>
+              openSql(`-- ${tab.schema}\n`, { database: tab.schema })
+            }
             onOpenTable={openTable}
           />
         );
@@ -983,7 +1001,7 @@ export function AppShell({
             driver={active.driver}
             schema={tab.schema}
             name={tab.name}
-            onOpenInSqlEditor={(sql) => openSql(sql)}
+            onOpenInSqlEditor={(sql) => openSql(sql, { database: tab.schema })}
             onAfterDrop={() => {
               setSidebarRefreshToken((n) => n + 1);
               closeTab(tab.id);
@@ -1047,7 +1065,7 @@ export function AppShell({
         }}
         onManageConnections={() => setShowManage(true)}
         globalTreeView={globalTreeView}
-        onToggleGlobalTreeView={() => setGlobalTreeView((v) => !v)}
+        onToggleGlobalTreeView={toggleGlobalTreeView}
         rightSlot={userArea}
       />
       <div
@@ -1058,7 +1076,9 @@ export function AppShell({
           connectionId={activeId}
           driver={active?.driver ?? null}
           activeTab={activeTab}
-          activeSchema={activeSchema}
+          // Withheld until hydrated: right after a switch it's still the
+          // previous connection's schema.
+          activeSchema={hydrated ? activeSchema : null}
           onChangeSchema={changeSchema}
           onSchemasLoaded={handleSchemasLoaded}
           onOpenTable={openTable}
@@ -1106,8 +1126,13 @@ export function AppShell({
           }
           onGenerateSql={
             active
-              ? (schemaName, name, kind) =>
-                  void generateSqlFor(active.id, schemaName, name, kind)
+              ? (schemaName, name, kind, connId) =>
+                  void generateSqlFor(
+                    connId ?? active.id,
+                    schemaName,
+                    name,
+                    kind,
+                  )
               : undefined
           }
           onEditConnection={(id) => {
@@ -1116,6 +1141,7 @@ export function AppShell({
           }}
           onDeleteConnection={(id) => setDeleteConnectionId(id)}
           refreshToken={sidebarRefreshToken}
+          appVersion={appVersion}
         />
         <SidebarResizer
           width={sidebarWidth}
@@ -1125,6 +1151,11 @@ export function AppShell({
           max={SIDEBAR_WIDTH_MAX}
         />
         <main className="dv-main">
+          {/* e.g. listConnections failing (server down, expired session):
+              without this the user only saw "Creá una conexión". */}
+          {!active && error && (
+            <ErrorBanner error={error} onDismiss={() => setError(null)} />
+          )}
           {!active && (
             <div className="dv-empty">
               Creá una conexión para empezar.
@@ -1138,7 +1169,7 @@ export function AppShell({
               </div>
             </div>
           )}
-          {active && (
+          {active && hydrated && (
             <>
               <WorkspaceTabBar
                 tabs={tabs}
@@ -1156,8 +1187,11 @@ export function AppShell({
                 onToggleGroupCollapsed={toggleGroupCollapsed}
                 onDissolveGroup={dissolveGroup}
                 onCloseGroup={closeGroup}
+                onMoveTab={reorderTab}
               />
-              {error && <div className="dv-error">{error}</div>}
+              {error && (
+                <ErrorBanner error={error} onDismiss={() => setError(null)} />
+              )}
               <div className="dv-workspace">
                 {tabs.map((tab) => (
                   <div
@@ -1246,6 +1280,17 @@ export function AppShell({
             // If the dropped schema is the one currently selected, clear it
             // so the workspace doesn't try to load tables from a dead schema.
             if (activeSchema === dropDbName) setActiveSchema(null);
+            // Its table/overview/diagram tabs would only show errors now.
+            const dead = tabs
+              .filter(
+                (t) =>
+                  (t.kind === "table" ||
+                    t.kind === "database-overview" ||
+                    t.kind === "schema") &&
+                  t.schema === dropDbName,
+              )
+              .map((t) => t.id);
+            if (dead.length > 0) closeTabIds(dead);
             setDropDbName(null);
             setDropDbCascade(false);
             setSidebarRefreshToken((n) => n + 1);
@@ -1391,22 +1436,52 @@ export function AppShell({
             setEditingConnectionId(null);
           }}
           onSaved={async (id) => {
-            const wasEditingFromManage = showManage && editingConnectionId !== null;
+            const wasEditing = editingConnectionId !== null;
             setShowForm(false);
             setEditingConnectionId(null);
             await refresh();
+            // The manage modal keeps its own copy of the connections.
+            if (showManage) setManageRefreshToken((n) => n + 1);
             // Only switch to the saved connection when creating a brand-new
-            // one. If the user was editing from "Gestionar conexiones", they
-            // should stay where they were — and the manage modal needs to
-            // refresh its local copy of the connection.
-            if (wasEditingFromManage) {
-              setManageRefreshToken((n) => n + 1);
-            } else {
+            // one; editing (from the sidebar or from "Gestionar conexiones")
+            // keeps the user where they were.
+            if (!wasEditing) {
               setActiveId(id);
+            } else if (id === activeId) {
+              // Host/database/credentials may have changed: the sidebar keys
+              // its fetches on the connection id, so force a reload.
+              setSidebarRefreshToken((n) => n + 1);
             }
           }}
         />
       )}
+    </div>
+  );
+}
+
+function ErrorBanner({
+  error,
+  onDismiss,
+}: {
+  error: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="dv-error"
+      role="alert"
+      style={{ display: "flex", alignItems: "flex-start", gap: 8 }}
+    >
+      <span style={{ flex: 1 }}>{error}</span>
+      <button
+        type="button"
+        className="dv-icon-button"
+        onClick={onDismiss}
+        aria-label="Cerrar error"
+        title="Cerrar"
+      >
+        ✕
+      </button>
     </div>
   );
 }

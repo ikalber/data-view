@@ -28,10 +28,14 @@ import {
 } from "@data-view/core";
 import { useTransport } from "../transport-context";
 import {
-  EditableDataGrid,
-  cellToString,
-  parseEnumValues,
+  buildInsertSql,
+  buildTablePreviewSql,
+  buildUpdateSql,
   rowPkKey,
+} from "../grid-sql";
+import { isExportCancelled } from "../export-format";
+import {
+  EditableDataGrid,
   type NewRow,
   type RowEdit,
   type SortState,
@@ -65,111 +69,6 @@ const TABS: { key: Tab; label: string }[] = [
 
 const PAGE_SIZE = 100;
 const SCROLL_THRESHOLD_PX = 400;
-
-function quoteIdent(driver: DatabaseDriver | null, s: string): string {
-  switch (driver) {
-    case "mysql":
-      return "`" + s.replace(/`/g, "``") + "`";
-    case "mssql":
-      return "[" + s.replace(/]/g, "]]") + "]";
-    case "postgres":
-    default:
-      return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s)
-        ? s
-        : `"${s.replace(/"/g, '""')}"`;
-  }
-}
-
-const NUMERIC_TYPE_RE =
-  /^(int|bigint|smallint|tinyint|mediumint|integer|number|numeric|decimal|float|double|real|money|smallmoney)/i;
-
-function isNumericType(dt: string | undefined): boolean {
-  return !!dt && NUMERIC_TYPE_RE.test(dt);
-}
-
-function isBoolType(dt: string | undefined): boolean {
-  return !!dt && /^(bool|boolean|bit\(1\)|tinyint\(1\))/i.test(dt);
-}
-
-/** Format a literal value for inclusion in a generated UPDATE statement. */
-function quoteValue(
-  driver: DatabaseDriver | null,
-  col: ColumnInfo | undefined,
-  raw: string,
-): string {
-  // Empty string means NULL (only meaningful for nullable columns; if not
-  // nullable the DB will reject it which surfaces as a per-row error).
-  if (raw === "") return "NULL";
-
-  if (isBoolType(col?.dataType)) {
-    const truthy = raw.toLowerCase() === "true" || raw === "1";
-    if (driver === "mysql") return truthy ? "1" : "0";
-    return truthy ? "TRUE" : "FALSE";
-  }
-
-  // ENUMs are quoted strings even though the dataType starts with "enum(".
-  if (parseEnumValues(col?.dataType)) {
-    return "'" + raw.replace(/'/g, "''") + "'";
-  }
-
-  if (isNumericType(col?.dataType)) {
-    // Pass numeric literals raw — invalid input will surface as a server error.
-    return raw.trim();
-  }
-
-  // Default: string literal with single-quote escaping.
-  return "'" + raw.replace(/'/g, "''") + "'";
-}
-
-function buildUpdateSql(
-  driver: DatabaseDriver | null,
-  schema: string,
-  name: string,
-  pkColumns: string[],
-  pkValuesByCol: Record<string, string>,
-  pkColInfo: Map<string, ColumnInfo>,
-  changes: Record<string, string>,
-  columnsInfo: Map<string, ColumnInfo>,
-): string {
-  const setClauses = Object.entries(changes)
-    .map(
-      ([col, val]) =>
-        `${quoteIdent(driver, col)} = ${quoteValue(driver, columnsInfo.get(col), val)}`,
-    )
-    .join(", ");
-  const whereClauses = pkColumns
-    .map(
-      (pk) =>
-        `${quoteIdent(driver, pk)} = ${quoteValue(
-          driver,
-          pkColInfo.get(pk),
-          pkValuesByCol[pk] ?? "",
-        )}`,
-    )
-    .join(" AND ");
-  return `UPDATE ${quoteIdent(driver, schema)}.${quoteIdent(
-    driver,
-    name,
-  )} SET ${setClauses} WHERE ${whereClauses}`;
-}
-
-function buildInsertSql(
-  driver: DatabaseDriver | null,
-  schema: string,
-  name: string,
-  values: Record<string, string>,
-  columnsInfo: Map<string, ColumnInfo>,
-): string {
-  const cols = Object.keys(values);
-  const colList = cols.map((c) => quoteIdent(driver, c)).join(", ");
-  const valList = cols
-    .map((c) => quoteValue(driver, columnsInfo.get(c), values[c] ?? ""))
-    .join(", ");
-  return `INSERT INTO ${quoteIdent(driver, schema)}.${quoteIdent(
-    driver,
-    name,
-  )} (${colList}) VALUES (${valList})`;
-}
 
 function makeTempId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -446,10 +345,13 @@ export function TablePane({
     setConfirmKind(null);
     setCascade(false);
     onAfterTruncate?.();
+    // Pending edits point at rows that no longer exist.
+    setEdits(new Map());
+    setRowErrors(new Map());
+    setSaveError(null);
     // Reload the data view so the empty result is visible.
     refreshDetails();
-    setData(null);
-    requestIdRef.current += 1;
+    if (tab === "data") loadData(appliedWhere, sort);
   }
 
   // Close the actions menu on outside click / Escape.
@@ -522,10 +424,13 @@ export function TablePane({
   }
 
   function onChangeCell(pkKey: string, colName: string, value: string | null) {
+    // Capture the row's PK values now, while the row is on screen: a later
+    // sort/filter/refetch may hide it, and the UPDATE still needs its WHERE.
+    const capturedPk = value === null ? null : pkValuesForKey(pkKey);
     setEdits((prev) => {
       const next = new Map(prev);
-      const existing = next.get(pkKey)?.changes ?? {};
-      const updated = { ...existing };
+      const existing = next.get(pkKey);
+      const updated = { ...(existing?.changes ?? {}) };
       if (value === null) {
         delete updated[colName];
       } else {
@@ -534,7 +439,10 @@ export function TablePane({
       if (Object.keys(updated).length === 0) {
         next.delete(pkKey);
       } else {
-        next.set(pkKey, { changes: updated });
+        next.set(pkKey, {
+          changes: updated,
+          pk: existing?.pk ?? capturedPk ?? undefined,
+        });
       }
       return next;
     });
@@ -608,18 +516,17 @@ export function TablePane({
     });
   }
 
-  // We need the original PK values for each dirty pkKey to build the WHERE.
-  // Capture them from the currently-loaded rows.
-  function pkValuesForKey(pkKey: string): Record<string, string> | null {
+  // Original (raw) PK values for a pkKey, looked up in the loaded rows.
+  function pkValuesForKey(pkKey: string): Record<string, CellValue> | null {
     if (!data) return null;
     for (const row of data.rows) {
       const k = rowPkKey(row, colNameToIdx, pkColumns);
       if (k === pkKey) {
-        const out: Record<string, string> = {};
+        const out: Record<string, CellValue> = {};
         for (const pk of pkColumns) {
           const idx = colNameToIdx.get(pk);
           if (idx == null) return null;
-          out[pk] = cellToString(row[idx]);
+          out[pk] = row[idx] ?? null;
         }
         return out;
       }
@@ -627,35 +534,49 @@ export function TablePane({
     return null;
   }
 
+  // A ref (not the `saving` state) guards re-entry: two Ctrl+S presses in the
+  // same tick would both see `saving === false` through their closures.
+  const savingRef = useRef(false);
+
   const saveAll = useCallback(async () => {
-    if (saving) return;
+    if (savingRef.current) return;
     if (edits.size === 0 && populatedNewRows.length === 0) return;
+    savingRef.current = true;
     setSaving(true);
     setSaveError(null);
 
     const remaining = new Map(edits);
     const errs = new Map(rowErrors);
+    let anySaved = false;
 
     for (const [pkKey, edit] of edits) {
-      const pkValues = pkValuesForKey(pkKey);
+      const pkValues = edit.pk ?? pkValuesForKey(pkKey);
       if (!pkValues) {
         errs.set(pkKey, "No se encontró la fila original");
         continue;
       }
-      const sql = buildUpdateSql(
-        driver,
-        schema,
-        name,
-        pkColumns,
-        pkValues,
-        columnsInfo,
-        edit.changes,
-        columnsInfo,
-      );
       try {
-        await transport.runQuery(connectionId, sql);
+        const sql = buildUpdateSql(
+          driver,
+          schema,
+          name,
+          pkColumns,
+          pkValues,
+          edit.changes,
+          columnsInfo,
+        );
+        const r = await transport.runQuery(connectionId, sql);
+        // 0 matched rows means the WHERE missed (row deleted or PK changed
+        // elsewhere) — don't report that as saved. MySQL is skipped: some
+        // clients report *changed* rows, which is 0 for a same-value write.
+        if (r.affectedRows === 0 && driver !== "mysql") {
+          throw new Error(
+            "No se actualizó ninguna fila: la fila ya no existe o cambió su PK. Refrescá los datos.",
+          );
+        }
         remaining.delete(pkKey);
         errs.delete(pkKey);
+        anySaved = true;
       } catch (e) {
         errs.set(pkKey, e instanceof Error ? e.message : String(e));
       }
@@ -670,36 +591,49 @@ export function TablePane({
         remainingNew.push(nr);
         continue;
       }
-      const sql = buildInsertSql(driver, schema, name, nr.values, columnsInfo);
       try {
+        const sql = buildInsertSql(driver, schema, name, nr.values, columnsInfo);
         await transport.runQuery(connectionId, sql);
         // Drop the row from the staged buffer — the refetch below will surface
         // the persisted version with server-assigned defaults / auto-increment.
+        anySaved = true;
       } catch (e) {
         remainingNew.push(nr);
         newErrs.set(nr.tempId, e instanceof Error ? e.message : String(e));
       }
     }
 
-    setEdits(remaining);
+    // Keep edits/rows typed while the save was running (they aren't part of
+    // this batch): only drop what was actually persisted.
+    setEdits((current) => {
+      const next = new Map(current);
+      for (const [k, e] of edits) {
+        if (!remaining.has(k) && next.get(k) === e) next.delete(k);
+      }
+      return next;
+    });
     setRowErrors(errs);
-    setNewRows(remainingNew);
+    const persistedNew = new Set(
+      newRows
+        .filter((nr) => !remainingNew.includes(nr))
+        .map((nr) => nr.tempId),
+    );
+    setNewRows((current) => current.filter((nr) => !persistedNew.has(nr.tempId)));
     setNewRowErrors(newErrs);
+    savingRef.current = false;
     setSaving(false);
 
     const totalErrs = errs.size + newErrs.size;
-    if (totalErrs > 0) {
-      setSaveError(
-        `${totalErrs} fila${totalErrs === 1 ? "" : "s"} con error — revisá las celdas resaltadas`,
-      );
-    } else {
-      setSaveError(null);
-      // refetch to surface server-side normalization (default values, triggers)
-      loadData(appliedWhere, sort);
-    }
+    setSaveError(
+      totalErrs > 0
+        ? `${totalErrs} fila${totalErrs === 1 ? "" : "s"} con error — revisá las celdas resaltadas`
+        : null,
+    );
+    // Refetch whenever something was written — also on partial failure, or
+    // the rows that did save would keep showing their old values.
+    if (anySaved) loadData(appliedWhere, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    saving,
     edits,
     rowErrors,
     newRows,
@@ -709,6 +643,8 @@ export function TablePane({
     name,
     pkColumns,
     columnsInfo,
+    colNameToIdx,
+    data,
     connectionId,
     transport,
     appliedWhere,
@@ -719,11 +655,16 @@ export function TablePane({
   // Ctrl+S / ⌘S to save while the data tab is open.
   const saveAllRef = useRef(saveAll);
   saveAllRef.current = saveAll;
+  const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (tab !== "data") return;
     const onKey = (e: globalThis.KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         if (edits.size === 0 && populatedNewRows.length === 0) return;
+        // Every workspace tab stays mounted (inactive ones are `hidden`), so
+        // only the visible pane may react — otherwise Ctrl+S in one tab
+        // would also save the pending edits of every other table tab.
+        if (!rootRef.current || rootRef.current.closest("[hidden]")) return;
         e.preventDefault();
         void saveAllRef.current();
       }
@@ -732,14 +673,13 @@ export function TablePane({
     return () => window.removeEventListener("keydown", onKey);
   }, [tab, edits.size, populatedNewRows.length]);
 
-  const sqlForTable = `SELECT * FROM ${quoteIdent(driver, schema)}.${quoteIdent(
+  const sqlForTable = buildTablePreviewSql(
     driver,
+    schema,
     name,
-  )}${appliedWhere.trim() ? `\nWHERE ${appliedWhere.trim()}` : ""}${
-    sort
-      ? `\nORDER BY ${quoteIdent(driver, sort.column)} ${sort.direction.toUpperCase()}`
-      : ""
-  }\nLIMIT 100;`;
+    appliedWhere,
+    sort,
+  );
 
   const [exportStatus, setExportStatus] = useState<
     | { kind: "running"; format: ExportFormat }
@@ -760,6 +700,11 @@ export function TablePane({
         });
         setExportStatus({ kind: "done", result });
       } catch (e) {
+        // The desktop save dialog throws when dismissed — that's not an error.
+        if (isExportCancelled(e)) {
+          setExportStatus(null);
+          return;
+        }
         setExportStatus({
           kind: "error",
           message: e instanceof Error ? e.message : String(e),
@@ -780,7 +725,10 @@ export function TablePane({
   const filterDirty = whereInput.trim() !== appliedWhere.trim();
 
   return (
-    <div className={clsx("dv-page", tab === "data" && "is-fill")}>
+    <div
+      ref={rootRef}
+      className={clsx("dv-page", tab === "data" && "is-fill")}
+    >
       <div className="dv-page-eyebrow">
         <span>Tablas</span>
         <span className="sep">/</span>
@@ -980,8 +928,11 @@ export function TablePane({
           )}
           {exportStatus.kind === "done" && (
             <>
-              ✓ {exportStatus.result.rowCount.toLocaleString()} filas exportadas ·{" "}
-              {(exportStatus.result.bytes / 1024).toFixed(1)} KB ·{" "}
+              ✓{" "}
+              {exportStatus.result.rowCount != null
+                ? `${exportStatus.result.rowCount.toLocaleString()} filas exportadas`
+                : "Exportado"}{" "}
+              · {(exportStatus.result.bytes / 1024).toFixed(1)} KB ·{" "}
               {exportStatus.result.durationMs}ms
               {exportStatus.result.filePath && (
                 <>
@@ -1163,6 +1114,7 @@ export function TablePane({
             >
               <EditableDataGrid
                 result={data}
+                driver={driver}
                 columnsInfo={columnsInfo}
                 pkColumns={pkColumns}
                 edits={edits}
@@ -1212,7 +1164,7 @@ export function TablePane({
           schema={schema}
           name={name}
           details={details}
-          loading={loading && !details}
+          loading={!details && !error}
           onChanged={refreshDetails}
         />
       )}
@@ -1290,11 +1242,11 @@ function IndexesTab({
       });
       setConfirmDrop(null);
       onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
+    // Errors propagate to the ConfirmDialog, which shows them in place (the
+    // tab's own error banner would be hidden behind the modal).
   }
 
   if (loading && !details)

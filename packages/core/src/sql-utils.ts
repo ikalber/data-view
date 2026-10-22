@@ -1,5 +1,26 @@
 import type { DatabaseDriver, TableDetails } from "./types";
 
+/**
+ * Postgres keywords that can't be used as bare identifiers (reserved, plus the
+ * "non-reserved (cannot be function or type)" ones that break in column
+ * position). Over-quoting is harmless, so the list errs on the inclusive side.
+ */
+const PG_RESERVED = new Set(
+  (
+    "all analyse analyze and any array as asc asymmetric authorization between bigint binary bit " +
+    "boolean both case cast char character check coalesce collate collation column concurrently " +
+    "constraint create cross current_catalog current_date current_role current_schema current_time " +
+    "current_timestamp current_user dec decimal default deferrable desc distinct do else end except " +
+    "exists extract false fetch float for foreign freeze from full grant greatest group grouping having " +
+    "ilike in initially inner inout int integer intersect interval into is isnull join lateral leading " +
+    "least left like limit localtime localtimestamp national natural nchar none normalize not notnull " +
+    "null nullif numeric offset on only or order out outer overlaps overlay placing position precision " +
+    "primary real references returning right row select session_user setof similar smallint some " +
+    "substring symmetric system_user table tablesample then time timestamp to trailing treat trim true " +
+    "union unique user using values varchar variadic verbose when where window with"
+  ).split(" "),
+);
+
 /** Quote an identifier per the active driver's rules. */
 export function quoteIdent(
   driver: DatabaseDriver | null | undefined,
@@ -12,7 +33,9 @@ export function quoteIdent(
       return "[" + s.replace(/]/g, "]]") + "]";
     case "postgres":
     default:
-      return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s)
+      // Unquoted identifiers fold to lowercase in Postgres, so only plain
+      // lowercase non-keywords can be left bare.
+      return /^[a-z_][a-z0-9_$]*$/.test(s) && !PG_RESERVED.has(s)
         ? s
         : `"${s.replace(/"/g, '""')}"`;
   }
@@ -34,9 +57,22 @@ export function quoteIdentStrict(
   }
 }
 
-/** Single-quote a string literal with proper escaping. */
-export function quoteString(text: string): string {
-  return "'" + text.replace(/'/g, "''") + "'";
+/**
+ * Single-quote a string literal with proper escaping for the driver:
+ *  - MySQL treats backslash as an escape char (default sql_mode), so it gets
+ *    doubled too — otherwise `C:\temp` turns into a TAB and `abc\` breaks.
+ *  - SQL Server gets an `N'…'` literal so non-Latin text isn't mangled by the
+ *    database code page.
+ */
+export function quoteString(
+  text: string,
+  driver?: DatabaseDriver | null,
+): string {
+  if (driver === "mysql") {
+    return "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
+  }
+  const lit = "'" + text.replace(/'/g, "''") + "'";
+  return driver === "mssql" ? "N" + lit : lit;
 }
 
 /** Build the column-level CONSTRAINT clause for a CREATE TABLE foreign key.
@@ -233,10 +269,13 @@ export function generateInsertSql(
 ): string {
   const writable = columns.filter((c) => !looksAutoIncrement(c));
   if (writable.length === 0) {
-    return `INSERT INTO ${quoteFQN(driver, schema, name)} DEFAULT VALUES;`;
+    // MySQL has no `DEFAULT VALUES` form.
+    return driver === "mysql"
+      ? `INSERT INTO ${quoteFQN(driver, schema, name)} () VALUES ();`
+      : `INSERT INTO ${quoteFQN(driver, schema, name)} DEFAULT VALUES;`;
   }
   const colList = writable.map((c) => quoteIdentStrict(driver, c.name)).join(", ");
-  const valueList = writable.map((c) => placeholderFor(c)).join(", ");
+  const valueList = writable.map((c) => placeholderFor(driver, c)).join(", ");
   return `INSERT INTO ${quoteFQN(driver, schema, name)}\n  (${colList})\nVALUES\n  (${valueList});`;
 }
 
@@ -249,10 +288,10 @@ export function generateUpdateSql(
 ): string {
   const nonPk = columns.filter((c) => !c.isPrimaryKey);
   if (nonPk.length === 0) {
-    return `UPDATE ${quoteFQN(driver, schema, name)}\nSET <columna> = ${placeholderFor()}\nWHERE 1 = 1;`;
+    return `UPDATE ${quoteFQN(driver, schema, name)}\nSET <columna> = ${placeholderFor(driver)}\nWHERE 1 = 1;`;
   }
   const sets = nonPk
-    .map((c) => `  ${quoteIdentStrict(driver, c.name)} = ${placeholderFor(c)}`)
+    .map((c) => `  ${quoteIdentStrict(driver, c.name)} = ${placeholderFor(driver, c)}`)
     .join(",\n");
   const where = buildWhereClause(driver, columns);
   return `UPDATE ${quoteFQN(driver, schema, name)}\nSET\n${sets}\n${where};`;
@@ -276,18 +315,22 @@ function buildWhereClause(
   const pks = columns.filter((c) => c.isPrimaryKey);
   if (pks.length > 0) {
     const parts = pks
-      .map((c) => `${quoteIdentStrict(driver, c.name)} = ${placeholderFor(c)}`)
+      .map((c) => `${quoteIdentStrict(driver, c.name)} = ${placeholderFor(driver, c)}`)
       .join("\n  AND ");
     return `WHERE ${parts}`;
   }
   return "WHERE 1 = 1 /* TODO: filtrar — la tabla no tiene primary key */";
 }
 
-function placeholderFor(col?: GenColumn): string {
+function placeholderFor(
+  driver: DatabaseDriver | null | undefined,
+  col?: GenColumn,
+): string {
   if (!col) return "''";
   if (looksTextual(col.dataType)) return "''";
   if (looksNumeric(col.dataType)) return "0";
-  if (looksBoolean(col.dataType)) return "false";
+  // SQL Server has no boolean literals; bit columns take 0/1.
+  if (looksBoolean(col.dataType)) return driver === "mssql" ? "0" : "false";
   if (col.nullable) return "NULL";
   return "''";
 }

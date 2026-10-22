@@ -23,8 +23,13 @@ function looksNumeric(dataType?: string): boolean {
 }
 
 function looksBoolean(dataType?: string): boolean {
-  return !!dataType && /^(bool|boolean|tinyint\(1\)|bit\(1\))/i.test(dataType);
+  return (
+    !!dataType &&
+    /^(bool|boolean|tinyint\(1\)|bit\(1\)|bit$)/i.test(dataType.trim())
+  );
 }
+
+const TRUTHY_STRINGS = new Set(["true", "t", "1", "yes", "y", "on"]);
 
 /** Render a CellValue as a plain string (no quoting, no NULL marker). */
 export function cellAsString(v: CellValue): string {
@@ -58,21 +63,22 @@ export function cellAsSqlLiteral(
   if (v === null) return "NULL";
   if (typeof v === "object" && "__binary" in v) return "NULL";
   if (typeof v === "boolean") {
-    if (driver === "mysql") return v ? "1" : "0";
+    // MySQL stores booleans as tinyint; SQL Server has no TRUE/FALSE literals.
+    if (driver === "mysql" || driver === "mssql") return v ? "1" : "0";
     return v ? "TRUE" : "FALSE";
   }
   if (typeof v === "number") {
     return Number.isFinite(v) ? String(v) : "NULL";
   }
   if (looksBoolean(col.dataType)) {
-    const truthy = v === "true" || v === "1";
-    if (driver === "mysql") return truthy ? "1" : "0";
+    const truthy = TRUTHY_STRINGS.has(v.trim().toLowerCase());
+    if (driver === "mysql" || driver === "mssql") return truthy ? "1" : "0";
     return truthy ? "TRUE" : "FALSE";
   }
   if (looksNumeric(col.dataType) && /^-?\d+(\.\d+)?$/.test(v)) {
     return v;
   }
-  return quoteString(v);
+  return quoteString(v, driver);
 }
 
 function sqlTableRef(opts: FormatRowsOptions): string {
@@ -169,10 +175,16 @@ function formatSqlInserts(r: QueryResult, opts: FormatRowsOptions): string {
   return out.join("\n\n") + "\n";
 }
 
+function escapeMarkdownCell(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ");
+}
+
 function formatMarkdown(r: QueryResult): string {
   if (r.columns.length === 0) return "(sin columnas)";
-  const escape = (s: string) =>
-    s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ");
+  const escape = escapeMarkdownCell;
   const header = `| ${r.columns.map((c) => escape(c.name)).join(" | ")} |`;
   const sep = `| ${r.columns.map(() => "---").join(" | ")} |`;
   const rows = r.rows.map(
@@ -273,10 +285,7 @@ export function formatBatchBody(
                 const s = cellAsString(v as CellValue);
                 return s === "" && (v as CellValue) === null
                   ? ""
-                  : s
-                      .replace(/\\/g, "\\\\")
-                      .replace(/\|/g, "\\|")
-                      .replace(/\n/g, " ");
+                  : escapeMarkdownCell(s);
               })
               .join(" | ")} |`,
         )
@@ -305,7 +314,7 @@ export function formatBatchPrelude(
       return "[\n";
     case "markdown": {
       const head = `| ${columns
-        .map((c) => c.name.replace(/\|/g, "\\|"))
+        .map((c) => escapeMarkdownCell(c.name))
         .join(" | ")} |`;
       const sep = `| ${columns.map(() => "---").join(" | ")} |`;
       return `${head}\n${sep}\n`;
@@ -323,6 +332,7 @@ export function formatBatchPostlude(opts: FormatRowsOptions): string {
       return "\n]\n";
     case "csv":
     case "tsv":
+      return "\r\n";
     case "markdown":
       return "\n";
     case "ndjson":
@@ -338,8 +348,8 @@ export function formatBatchSeparator(opts: FormatRowsOptions): string {
       return ",\n";
     case "csv":
     case "tsv":
-    case "markdown":
       return "\r\n";
+    case "markdown":
     case "ndjson":
       return "\n";
     case "sql":
