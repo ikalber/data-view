@@ -640,6 +640,41 @@ body.is-resizing-sidebar * {
   font-family: var(--dv-mono);
 }
 
+/* Gives way first (truncates) when the toolbar runs out of room. */
+.dv-sql-size-hint {
+  color: var(--dv-warn);
+  cursor: help;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 10;
+}
+
+/* Files dragged over the window (desktop). The OS drag is handled by Tauri,
+   not by the page, so this is only a hint and never takes pointer events. */
+.dv-file-drop {
+  position: fixed;
+  inset: 8px;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--dv-accent);
+  border-radius: var(--dv-radius-card);
+  background: rgba(var(--dv-accent-rgb), 0.08);
+  pointer-events: none;
+}
+
+.dv-file-drop-card {
+  padding: 14px 20px;
+  background: var(--dv-panel);
+  color: var(--dv-text);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-card);
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .dv-button {
   background: var(--dv-panel);

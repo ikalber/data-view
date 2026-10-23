@@ -247,31 +247,44 @@ pub async fn drop_index(
     db::drop_index(&conn, &options).await
 }
 
+/// Largest text file the editor will open. Keep in sync with
+/// `MAX_SQL_FILE_BYTES` in packages/ui/src/components/AppShell.tsx.
+const MAX_TEXT_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Read a UTF-8 text file from disk. Used by the desktop app to open .sql
-/// files picked from the OS dialog and load them into a new SQL editor tab.
-/// Limited to a generous-but-finite size so an accidental pick of a huge
-/// non-SQL file can't lock up the UI.
+/// files picked from the OS dialog or dropped on the window, and load them
+/// into a new SQL editor tab. Limited to a generous-but-finite size so an
+/// accidental pick of a huge non-SQL file can't lock up the UI.
+///
+/// The text goes back as raw bytes (the frontend decodes it): for dumps of
+/// tens of MB that avoids JSON-escaping and re-parsing the whole script.
 #[tauri::command]
-pub async fn read_text_file(path: String) -> AppResult<String> {
-    const MAX_BYTES: u64 = 16 * 1024 * 1024;
-    let p = PathBuf::from(&path);
+pub async fn read_text_file(path: String) -> AppResult<tauri::ipc::Response> {
+    Ok(tauri::ipc::Response::new(read_utf8_file(&path).await?))
+}
+
+async fn read_utf8_file(path: &str) -> AppResult<Vec<u8>> {
+    let p = PathBuf::from(path);
     if p.as_os_str().is_empty() {
         return Err(AppError::msg("ruta vacía"));
     }
     let metadata = tokio::fs::metadata(&p)
         .await
         .map_err(|e| AppError::msg(format!("No se pudo leer {}: {}", path, e)))?;
-    if metadata.len() > MAX_BYTES {
+    if metadata.len() > MAX_TEXT_FILE_BYTES {
+        const MB: f64 = 1024.0 * 1024.0;
         return Err(AppError::msg(format!(
-            "Archivo demasiado grande ({} MB; máximo {} MB)",
-            metadata.len() / (1024 * 1024),
-            MAX_BYTES / (1024 * 1024)
+            "Archivo demasiado grande ({:.1} MB; máximo {} MB)",
+            metadata.len() as f64 / MB,
+            MAX_TEXT_FILE_BYTES / (1024 * 1024)
         )));
     }
     let bytes = tokio::fs::read(&p)
         .await
         .map_err(|e| AppError::msg(format!("No se pudo leer {}: {}", path, e)))?;
-    String::from_utf8(bytes).map_err(|_| AppError::msg("El archivo no parece UTF-8 válido"))
+    std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::msg("El archivo no parece UTF-8 válido"))?;
+    Ok(bytes)
 }
 
 /// Write a UTF-8 text file chosen by the user in the OS "save" dialog. The
@@ -305,29 +318,39 @@ mod tests {
                 .unwrap(),
             13
         );
-        assert_eq!(read_text_file(path.clone()).await.unwrap(), "SELECT 'ñ';\n");
+        assert_eq!(
+            read_utf8_file(&path).await.unwrap(),
+            "SELECT 'ñ';\n".as_bytes()
+        );
 
         let bin = dir.join("bin.dat");
         std::fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
-        let err = read_text_file(bin.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
+        let err = read_utf8_file(&bin.to_string_lossy()).await.unwrap_err();
         assert!(err.to_string().contains("UTF-8"));
 
+        // Exactly at the limit still opens; one byte more doesn't. Sparse
+        // files, so this doesn't write 100 MB to disk.
+        let at_limit = dir.join("at_limit.sql");
+        std::fs::File::create(&at_limit)
+            .unwrap()
+            .set_len(MAX_TEXT_FILE_BYTES)
+            .unwrap();
+        assert_eq!(
+            read_utf8_file(&at_limit.to_string_lossy()).await.unwrap().len() as u64,
+            MAX_TEXT_FILE_BYTES
+        );
         let big = dir.join("big.sql");
-        let f = std::fs::File::create(&big).unwrap();
-        f.set_len(16 * 1024 * 1024 + 1).unwrap();
-        let err = read_text_file(big.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_TEXT_FILE_BYTES + 1)
+            .unwrap();
+        let err = read_utf8_file(&big.to_string_lossy()).await.unwrap_err();
         assert!(err.to_string().contains("demasiado grande"));
 
-        assert!(read_text_file(String::new()).await.is_err());
-        assert!(
-            read_text_file(dir.join("missing").to_string_lossy().into_owned())
-                .await
-                .is_err()
-        );
+        assert!(read_utf8_file("").await.is_err());
+        assert!(read_utf8_file(&dir.join("missing").to_string_lossy())
+            .await
+            .is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

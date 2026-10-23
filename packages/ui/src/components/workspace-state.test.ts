@@ -6,8 +6,10 @@ import {
   expandGroupOf,
   focusAfterCollapse,
   isSqlTabDirty,
+  MAX_PERSISTED_SQL_CHARS,
   moveTab,
   normalizeGroupOrder,
+  persistableTabs,
   pruneGroups,
   restoreWorkspace,
   sanitizeFiles,
@@ -87,6 +89,31 @@ describe("isSqlTabDirty", () => {
     expect(isSqlTabDirty({ ...base, id: "4", sql: "select 2", fileId: "f" }, files)).toBe(true);
     expect(isSqlTabDirty({ ...base, id: "5", sql: "select 1", fileId: "gone" }, files)).toBe(true);
     expect(isSqlTabDirty(table("t"), files)).toBe(false);
+  });
+});
+
+describe("persistableTabs", () => {
+  const sqlTab = (id: string, sql: string): WorkspaceTab => ({
+    id,
+    kind: "sql",
+    title: id,
+    sql,
+    fileId: null,
+    database: null,
+  });
+
+  it("returns the same array when nothing is too big", () => {
+    const tabs = [table("a"), sqlTab("s", "x".repeat(MAX_PERSISTED_SQL_CHARS))];
+    expect(persistableTabs(tabs)).toBe(tabs);
+  });
+
+  it("leaves out only the SQL tabs over the limit", () => {
+    const tabs = [
+      table("a"),
+      sqlTab("big", "x".repeat(MAX_PERSISTED_SQL_CHARS + 1)),
+      sqlTab("small", "select 1"),
+    ];
+    expect(ids(persistableTabs(tabs))).toEqual(["a", "small"]);
   });
 });
 

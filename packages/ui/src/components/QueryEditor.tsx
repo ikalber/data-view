@@ -15,6 +15,11 @@ import { recordHistoryEntry } from "../query-history";
 import { ResultsTable } from "./ResultsTable";
 import { ExportMenu } from "./ExportMenu";
 import { SqlCodeEditor, type SqlEditorHandle } from "./SqlCodeEditor";
+import {
+  formatMb,
+  isOversizedSql,
+  MAX_PERSISTED_SQL_CHARS,
+} from "./workspace-state";
 
 export interface SavedFile {
   id: string;
@@ -521,6 +526,14 @@ export function QueryEditor({
             </div>
           )}
         </div>
+        {isOversizedSql(sql) && (
+          <span
+            className="dv-toolbar-meta dv-sql-size-hint"
+            title={`Las pestañas de más de ${formatMb(MAX_PERSISTED_SQL_CHARS)} no se recuerdan al cerrar la app ni se pueden guardar en Archivos.`}
+          >
+            {formatMb(sql.length)} · solo esta sesión
+          </span>
+        )}
         <span className="dv-toolbar-meta">
           {runtime.result
             ? `${runtime.result.rowCount} filas · ${runtime.result.durationMs}ms${

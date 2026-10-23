@@ -11,6 +11,7 @@ export {
   type HackerVariant,
 } from "./theme-context";
 export { AppShell } from "./components/AppShell";
+export type { DroppedFile, FileDropListener } from "./components/AppShell";
 export { Topbar } from "./components/Topbar";
 export { BrandLogo } from "./components/BrandLogo";
 export { ThemeSwitcher } from "./components/ThemeSwitcher";

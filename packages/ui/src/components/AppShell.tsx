@@ -48,13 +48,31 @@ import {
   closeTabs,
   expandGroupOf,
   focusAfterCollapse,
+  formatMb,
+  isOversizedSql,
   isSqlTabDirty,
+  MAX_PERSISTED_SQL_CHARS,
   moveTab,
+  persistableTabs,
   pruneGroups,
   restoreWorkspace,
   ungroupTab,
   type DropPlace,
 } from "./workspace-state";
+
+/** A file dropped on the window, read on demand. */
+export interface DroppedFile {
+  /** File name with extension, e.g. "dump.sql". */
+  name: string;
+  /** Reads the contents as text. Rejects with a user-facing message. */
+  read: () => Promise<string>;
+}
+
+export interface FileDropListener {
+  /** Files started (true) or stopped (false) being dragged over the window. */
+  onDragActive: (active: boolean) => void;
+  onDrop: (files: DroppedFile[]) => void;
+}
 
 interface Props {
   /** Right-side slot in the topbar (user menu, sign-out link, etc). */
@@ -72,6 +90,12 @@ interface Props {
    * reads the file via FileReader.
    */
   onPickSqlFile?: () => Promise<{ name: string; sql: string } | null>;
+  /**
+   * Subscribes to files dropped on the window; returns the unsubscribe.
+   * Dropped .sql/.txt files open in new SQL tabs. The desktop wires it to
+   * Tauri's drag & drop events; the web doesn't pass it.
+   */
+  subscribeFileDrop?: (listener: FileDropListener) => () => void;
   /** App version shown in the sidebar footer (e.g. "1.1.1"). Hidden when
    * omitted. */
   appVersion?: string;
@@ -90,8 +114,12 @@ const SIDEBAR_WIDTH_MIN = 180;
 const SIDEBAR_WIDTH_MAX = 520;
 const SIDEBAR_WIDTH_DEFAULT = 264;
 const GLOBAL_TREE_KEY = "dbview.globalTreeView";
-// Same cap the desktop picker enforces; bigger files freeze the editor.
-const MAX_SQL_FILE_BYTES = 16 * 1024 * 1024;
+// Same cap the desktop enforces (MAX_TEXT_FILE_BYTES in commands.rs). In
+// Chromium the editor opens 100 MB in about half a second; typing lags
+// (~0.25 s per key) well before that size, but big files are mostly opened
+// to read or run.
+const MAX_SQL_FILE_BYTES = 100 * 1024 * 1024;
+const SQL_FILE_RE = /\.(sql|txt)$/i;
 
 function readInitialGlobalTreeView(): boolean {
   if (typeof window === "undefined") return false;
@@ -147,6 +175,7 @@ export function AppShell({
   userArea,
   enableCloseTabShortcut,
   onPickSqlFile,
+  subscribeFileDrop,
   appVersion,
 }: Props) {
   const transport = useTransport();
@@ -325,7 +354,7 @@ export function AppShell({
   // Persist after hydration.
   useEffect(() => {
     if (!activeId || hydratedFor !== activeId) return;
-    writeJSON(TABS_KEY(activeId), tabs);
+    writeJSON(TABS_KEY(activeId), persistableTabs(tabs));
   }, [hydratedFor, activeId, tabs]);
   useEffect(() => {
     if (!activeId || hydratedFor !== activeId || activeTabId == null) return;
@@ -662,7 +691,7 @@ export function AppShell({
       if (!file) return;
       if (file.size > MAX_SQL_FILE_BYTES) {
         setError(
-          `"${file.name}" pesa ${(file.size / 1024 / 1024).toFixed(1)} MB; el máximo para abrir en el editor es 16 MB.`,
+          `"${file.name}" pesa ${formatMb(file.size)}; el máximo para abrir en el editor es ${formatMb(MAX_SQL_FILE_BYTES)}.`,
         );
         return;
       }
@@ -672,6 +701,57 @@ export function AppShell({
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [onPickSqlFile, openSql]);
+
+  // ── Drop files on the window (desktop) ─────────────────────────────────────
+  const [fileDrag, setFileDrag] = useState<"idle" | "over" | "opening">("idle");
+  // The subscription lives as long as the shell; it reads the current
+  // connection and opener from here instead of resubscribing every render.
+  const dropTargetRef = useRef({ activeId, hydrated, openSql });
+  dropTargetRef.current = { activeId, hydrated, openSql };
+  useEffect(() => {
+    if (!subscribeFileDrop) return;
+    let opening = false;
+    return subscribeFileDrop({
+      onDragActive: (on) => {
+        if (!opening) setFileDrag(on ? "over" : "idle");
+      },
+      onDrop: (dropped) => {
+        if (opening) return;
+        const connId = dropTargetRef.current.activeId;
+        if (!connId || !dropTargetRef.current.hydrated) {
+          setError("Elegí una conexión para abrir archivos SQL.");
+          return;
+        }
+        const problems = dropped
+          .filter((f) => !SQL_FILE_RE.test(f.name))
+          .map((f) => `"${f.name}": solo se pueden abrir archivos .sql o .txt.`);
+        const sqlFiles = dropped.filter((f) => SQL_FILE_RE.test(f.name));
+        if (sqlFiles.length === 0) {
+          setError(problems.join("\n"));
+          return;
+        }
+        opening = true;
+        setFileDrag("opening");
+        void (async () => {
+          // One at a time: several 100 MB files at once could exhaust memory.
+          for (const f of sqlFiles) {
+            try {
+              const sql = await f.read();
+              // Switched connections while a big file loaded: its tabs
+              // would land in the other connection's workspace.
+              if (dropTargetRef.current.activeId !== connId) break;
+              dropTargetRef.current.openSql(sql, { title: stripSqlExt(f.name) });
+            } catch (e) {
+              problems.push(`"${f.name}": ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+          opening = false;
+          setFileDrag("idle");
+          if (problems.length > 0) setError(problems.join("\n"));
+        })();
+      },
+    });
+  }, [subscribeFileDrop]);
 
   const openTable = useCallback(
     (schema: string, name: string, opts?: { preview?: boolean }) => {
@@ -867,6 +947,14 @@ export function AppShell({
       fileId: string | null;
     }) => {
       const { tabId, title, sql, fileId } = info;
+      // Saved files live in localStorage too; a write that doesn't fit is
+      // dropped, so the "saved" script would be gone after a restart.
+      if (isOversizedSql(sql)) {
+        setError(
+          `"${title}" pesa ${formatMb(sql.length)}: Archivos solo guarda scripts de hasta ${formatMb(MAX_PERSISTED_SQL_CHARS)}.`,
+        );
+        return null;
+      }
       if (fileId == null) {
         const def = title.startsWith("Sin título") ? "" : title;
         const name = window.prompt("Nombre del archivo:", def);
@@ -1454,6 +1542,17 @@ export function AppShell({
             }
           }}
         />
+      )}
+      {fileDrag !== "idle" && (
+        <div className="dv-file-drop" role="status" aria-live="polite">
+          <div className="dv-file-drop-card">
+            {fileDrag === "opening"
+              ? "Abriendo archivo…"
+              : active
+                ? "Soltá el archivo .sql para abrirlo en una pestaña nueva"
+                : "Elegí una conexión para abrir archivos SQL"}
+          </div>
+        </div>
       )}
     </div>
   );

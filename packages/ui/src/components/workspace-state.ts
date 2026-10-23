@@ -138,6 +138,29 @@ export function sanitizeFiles(raw: unknown): SavedFile[] {
 }
 
 /** True when a SQL tab has content that isn't persisted in a saved file. */
+/** SQL longer than this isn't written to localStorage. Its ~5 MB quota is
+ * shared by every connection's tabs, the saved files and the query history,
+ * and a single write that doesn't fit fails the whole key: one big script
+ * used to stop every tab of the connection from being remembered. Such tabs
+ * live for the session only. */
+export const MAX_PERSISTED_SQL_CHARS = 1_000_000;
+
+export function isOversizedSql(sql: string): boolean {
+  return sql.length > MAX_PERSISTED_SQL_CHARS;
+}
+
+/** Size for user-facing messages: "48.2 MB", "100 MB". */
+export function formatMb(bytes: number): string {
+  return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+}
+
+/** The tabs to write to storage: all but SQL tabs too big to persist. Same
+ * array when there are none. */
+export function persistableTabs(tabs: WorkspaceTab[]): WorkspaceTab[] {
+  const tooBig = (t: WorkspaceTab) => t.kind === "sql" && isOversizedSql(t.sql);
+  return tabs.some(tooBig) ? tabs.filter((t) => !tooBig(t)) : tabs;
+}
+
 export function isSqlTabDirty(tab: WorkspaceTab, files: SavedFile[]): boolean {
   if (tab.kind !== "sql") return false;
   if (tab.fileId == null) return tab.sql.length > 0;

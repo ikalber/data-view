@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HISTORY_STORAGE_KEY,
   MAX_HISTORY_ENTRIES,
+  MAX_HISTORY_SQL_CHARS,
   parseHistory,
   recordHistoryEntry,
 } from "./query-history";
@@ -117,5 +118,24 @@ describe("recordHistoryEntry", () => {
     expect(entries.length).toBeLessThanOrEqual(10);
     // The newest entry always makes it in.
     expect(entries[0]!.sql).toBe("select 29");
+  });
+
+  it("keeps huge scripts as a commented-out preview", () => {
+    stubWindow(storage);
+    const line = "INSERT INTO t VALUES (1, 'x');\n";
+    const dump = line.repeat(Math.ceil((MAX_HISTORY_SQL_CHARS + 1) / line.length));
+    recordHistoryEntry({ connectionId: "c", sql: dump, status: "ok" });
+    const sql = stored(storage)[0]!.sql;
+    expect(sql.length).toBeLessThan(5_000);
+    expect(sql).toContain("INSERT INTO t VALUES (1, 'x');");
+    // Every line is a comment, so running it can't apply half the dump.
+    expect(sql.split("\n").every((l) => l.startsWith("--"))).toBe(true);
+  });
+
+  it("stores scripts up to the limit untouched", () => {
+    stubWindow(storage);
+    const sql = "x".repeat(MAX_HISTORY_SQL_CHARS);
+    recordHistoryEntry({ connectionId: "c", sql, status: "ok" });
+    expect(stored(storage)[0]!.sql).toBe(sql);
   });
 });

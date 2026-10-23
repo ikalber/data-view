@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import type { FileDropListener } from "@data-view/ui";
 import type {
   ConnectionConfig,
   ConnectionInput,
@@ -127,9 +129,64 @@ export async function pickAndReadSqlFile(): Promise<{
   });
   if (!result || Array.isArray(result)) return null;
   const path = result as string;
-  const sql = await call<string>("read_text_file", { path });
-  const base = path.split(/[\\/]/).pop() ?? "abierto.sql";
-  return { name: base, sql };
+  return { name: baseName(path), sql: await readTextFile(path) };
+}
+
+/**
+ * Subscribe to files dragged from the OS onto the window. Tauri intercepts
+ * those drops before the page sees them (so HTML5 `drop` events never fire for
+ * files) and hands us their paths, which we read from Rust on demand.
+ * Returns the unsubscribe function.
+ */
+export function subscribeFileDrop(listener: FileDropListener): () => void {
+  let disposed = false;
+  let unlisten: (() => void) | null = null;
+  getCurrentWebview()
+    .onDragDropEvent(({ payload }) => {
+      switch (payload.type) {
+        case "enter":
+          // Text or links dragged from another app arrive without paths.
+          listener.onDragActive(payload.paths.length > 0);
+          break;
+        case "leave":
+          listener.onDragActive(false);
+          break;
+        case "drop":
+          listener.onDragActive(false);
+          if (payload.paths.length === 0) break;
+          listener.onDrop(
+            payload.paths.map((path) => ({
+              name: baseName(path),
+              read: () => readTextFile(path),
+            })),
+          );
+          break;
+      }
+    })
+    .then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    })
+    .catch((e) => console.error("No se pudo escuchar el arrastre de archivos", e));
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}
+
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || "abierto.sql";
+}
+
+/** Rust validates UTF-8 and sends the raw bytes; TextDecoder also drops a
+ * leading BOM, which databases would otherwise reject as part of the SQL. */
+async function readTextFile(path: string): Promise<string> {
+  const data = await call<ArrayBuffer | number[]>("read_text_file", { path });
+  // Raw responses arrive as an ArrayBuffer, except on the postMessage IPC
+  // fallback, which serializes them as a plain array of bytes.
+  const bytes =
+    data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+  return new TextDecoder().decode(bytes);
 }
 
 /**

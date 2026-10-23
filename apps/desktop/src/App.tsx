@@ -1,5 +1,9 @@
 import { AppShell, ThemeProvider, TransportProvider } from "@data-view/ui";
-import { pickAndReadSqlFile, tauriTransport } from "./transport/tauri-transport";
+import {
+  pickAndReadSqlFile,
+  subscribeFileDrop,
+  tauriTransport,
+} from "./transport/tauri-transport";
 import { ZoomController } from "./zoom/ZoomController";
 // Vite inlines just this field; kept in sync with tauri.conf.json by the
 // release script.
@@ -13,6 +17,7 @@ export function App() {
         <AppShell
           enableCloseTabShortcut
           onPickSqlFile={pickAndReadSqlFile}
+          subscribeFileDrop={subscribeFileDrop}
           appVersion={appVersion}
           userArea={
             <span

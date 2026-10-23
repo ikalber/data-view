@@ -90,11 +90,30 @@ function makeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** Scripts longer than this are kept as a commented-out preview. A whole
+ * dump (tens of MB) never fits in localStorage, and each failed write
+ * re-serialized it while halving the list, stalling the UI after the run.
+ * Being only comments, the preview can't run half a script if it's reopened
+ * from the history and executed. */
+export const MAX_HISTORY_SQL_CHARS = 100_000;
+const HISTORY_PREVIEW_CHARS = 2_000;
+
+export function historySql(sql: string): string {
+  if (sql.length <= MAX_HISTORY_SQL_CHARS) return sql;
+  const mb = Number((sql.length / (1024 * 1024)).toFixed(1));
+  const preview = sql
+    .slice(0, HISTORY_PREVIEW_CHARS)
+    .split("\n")
+    .map((line) => `-- ${line}`)
+    .join("\n");
+  return `-- Script de ${mb} MB: el historial guarda solo el comienzo, comentado.\n${preview}\n-- …`;
+}
+
 export function recordHistoryEntry(input: RecordEntryInput): QueryHistoryEntry {
   const entry: QueryHistoryEntry = {
     id: makeId(),
     connectionId: input.connectionId,
-    sql: input.sql,
+    sql: historySql(input.sql),
     ranAt: new Date().toISOString(),
     durationMs: input.durationMs,
     rowCount: input.rowCount,
